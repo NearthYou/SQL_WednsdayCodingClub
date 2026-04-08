@@ -1,68 +1,104 @@
 # SQL_WednsdayCodingClub
 
-Week 6 학습용 미니 SQL Processor입니다.  
-현재 기준은 Phase 3까지 구현되어 있고, SQL 파일 하나에서 여러 문장을 읽어 CSV 파일에 반영하거나 조회할 수 있습니다.
+CSV 기반 미니 SQL Processor를 직접 구현한 C11 프로젝트입니다.  
+하나의 SQL 파일을 읽어 `INSERT`와 `SELECT`를 파싱하고, schema 규칙에 맞게 CSV 데이터를 안전하게 조회하거나 반영합니다.
 
-## 핵심 포인트
+## 기획 의도
 
-- 파서는 수동 스캐너 방식입니다.
-- 저장소는 데이터베이스 대신 `CSV + schema.csv`를 사용합니다.
-- 실행기는 여러 문장을 `all-or-nothing` 규칙으로 실행합니다.
-- `INSERT`가 먼저 실행된 뒤 같은 스크립트 안의 `SELECT`는 staged 결과를 볼 수 있습니다.
+이 프로젝트는 "SQL이 실제로 어떻게 읽히고 실행되는가"를 직접 구현하며 이해하는 것을 목표로 시작했습니다.
 
-## 현재 지원 문법
+- SQL 문장을 라이브러리에 맡기지 않고 수동 스캐너로 직접 파싱합니다.
+- 데이터 저장소를 복잡한 DB 엔진 대신 `CSV + schema.csv` 조합으로 단순화했습니다.
+- 실행 과정에서는 staging, commit, rollback 개념을 넣어 데이터 안정성을 학습할 수 있도록 설계했습니다.
+
+즉, 이 프로젝트는 단순한 문법 실습이 아니라 `파서`, `AST`, `실행기`, `스토리지`, `트랜잭션 비슷한 흐름`까지 하나의 작은 시스템으로 묶어 보는 데 의미가 있습니다.
+
+## 서비스 소개
+
+`SQL_WednsdayCodingClub`은 SQL 파일을 받아 CSV 데이터를 조작하거나 조회하는 CLI 프로그램입니다.
 
 - `INSERT INTO [schema.]table VALUES (...);`
 - `INSERT INTO [schema.]table (col1, col2, ...) VALUES (...);`
 - `SELECT * FROM [schema.]table;`
 - `SELECT col1, col2 FROM [schema.]table;`
-- SQL 파일 하나에 여러 문장을 순서대로 둘 수 있습니다.
-- 키워드는 대소문자를 구분하지 않습니다.
-- 공백과 개행은 유연하게 허용합니다.
-- 문자열은 작은따옴표를 사용하고, 내부 작은따옴표는 `''`로 escape 합니다.
-- 숫자는 정수만 지원합니다.
+- 한 SQL 파일 안에 여러 문장을 순서대로 실행할 수 있습니다.
 
-아직 지원하지 않는 것:
+이 프로젝트는 다음 상황을 다룹니다.
 
-- `WHERE`
-- `NULL`
-- default value
-- 일부 컬럼만 넣는 `INSERT`
-- `UPDATE`, `DELETE`, `CREATE TABLE`
+- schema가 존재할 때 컬럼 이름 기반 INSERT 재정렬
+- schema 타입 검증 (`INT`, `STRING`)
+- projection SELECT
+- staging 디렉터리를 통한 all-or-nothing 실행
 
-## CLI 사용법
+## 프로젝트 흐름
 
-```bash
-./sql_processor <sql_file> [data_dir]
+```mermaid
+flowchart LR
+    A[1. SQL 파일 입력] --> B[2. SQL 문장 해석]
+    B --> C[3. 실행 계획 생성]
+    C --> D{4. 데이터 변경이 필요한가?}
+
+    D -- SELECT만 있음 --> E[CSV 조회]
+    D -- INSERT 포함 --> F[복사본에서 먼저 실행]
+
+    F --> G[Schema 확인]
+    G --> H[컬럼 순서 정렬 및 타입 검증]
+    H --> I[CSV에 반영할 결과 준비]
+
+    E --> J[결과 출력 준비]
+    I --> K{5. 전체 문장 성공 여부}
+
+    K -- 성공 --> L[실제 CSV에 적용]
+    K -- 실패 --> M[전체 작업 취소]
+
+    L --> J
+    M --> N[에러 메시지 반환]
+    J --> O[최종 결과 출력]
 ```
 
-- `data_dir`를 생략하면 기본값은 `data/`입니다.
-- 두 번째 인자는 `CSV 파일 경로`가 아니라 `데이터 디렉터리 경로`입니다.
+프로젝트는 아래 흐름으로 동작합니다.
 
-예시:
+1. `main.c`가 SQL 파일 전체를 읽고 실행에 사용할 `data_dir`를 결정합니다.
+2. `parser.c`가 SQL 스크립트를 수동 스캐너 방식으로 읽어 `Statement`, `SqlScript` AST로 변환합니다.
+3. `execute.c`가 각 문장을 순서대로 실행합니다.
+4. `INSERT`가 포함된 경우 staging 디렉터리에서 먼저 실행해 원본 데이터 변경을 지연합니다.
+5. `storage.c`가 CSV와 schema 파일을 읽어 타입 검증, 컬럼 매핑, append, projection SELECT를 처리합니다.
+6. 모든 문장이 성공하면 commit, 하나라도 실패하면 rollback합니다.
 
-```bash
-./sql_processor queries/select_users.sql
-./sql_processor queries/select_user_names.sql
-./sql_processor queries/script_users_roundtrip.sql
-```
+## 핵심 개념
 
-## 파일 매핑 규칙
+### 1. Manual Scanner Parser
 
-- `table` -> `table.csv`
-- `schema.table` -> `schema__table.csv`
-- schema 파일은 아래 규칙을 따릅니다.
-  - `table` -> `table.schema.csv`
-  - `schema.table` -> `schema__table.schema.csv`
+이 프로젝트는 `strtok` 같은 단순 분리 대신 직접 위치를 추적하는 parser를 사용합니다.
 
-예시:
+- 대소문자 구분 없는 키워드 처리
+- 식별자 파싱
+- 정수 / 문자열 리터럴 파싱
+- `''` 문자열 escape 처리
+- 여러 SQL 문장의 세미콜론 경계 처리
+
+### 2. AST 기반 실행 구조
+
+파싱 결과는 곧바로 실행되지 않고 AST로 정리됩니다.
+
+- `Statement`
+  - 문장 타입
+  - schema / table
+  - column list
+  - values
+- `SqlScript`
+  - 여러 `Statement`를 순서대로 담는 스크립트 단위 구조
+
+이 구조 덕분에 파싱과 실행 책임이 분리되어 코드가 더 명확해졌습니다.
+
+### 3. CSV + Schema 저장소 모델
+
+테이블은 CSV 파일, 구조 정보는 별도의 schema CSV 파일로 관리합니다.
 
 - `users` -> `users.csv`, `users.schema.csv`
 - `app.users` -> `app__users.csv`, `app__users.schema.csv`
 
-## schema 파일 형식
-
-schema 파일은 단순 CSV 형식입니다.
+schema 파일 형식 예시는 아래와 같습니다.
 
 ```csv
 name,type
@@ -71,172 +107,126 @@ name,STRING
 age,INT
 ```
 
-현재 지원 타입:
+### 4. Staging / Commit / Rollback
 
-- `INT`
-- `STRING`
+여러 문장을 실행할 때는 원본 `data/`를 바로 수정하지 않습니다.
 
-## 실행 규칙
+- 먼저 staging 디렉터리로 필요한 CSV와 schema를 복사
+- staging에서 전체 스크립트 실행
+- 전부 성공하면 실제 데이터에 반영
+- 중간 실패 시 staging 폐기
 
-### 1. CSV 자동 생성
+이 방식으로 "하나 성공, 하나 실패" 같은 어중간한 상태를 막습니다.
 
-대상 CSV가 없더라도 아래 조건이면 자동 생성됩니다.
+## 트러블 슈팅 / 기술적 챌린지
 
-- 대응하는 `.schema.csv` 파일이 존재해야 합니다.
-- `INSERT`가 명시적 컬럼 목록을 사용해야 합니다.
-- 컬럼 목록이 schema의 모든 컬럼을 정확히 한 번씩 포함해야 합니다.
+### 1. 문자열과 세미콜론을 안전하게 파싱하기
 
-예시:
+SQL은 공백, 개행, 대소문자, 문자열 리터럴, 세미콜론 경계를 함께 처리해야 합니다.  
+단순 토큰 분리 방식으로는 quoted string과 statement boundary를 안정적으로 다루기 어렵기 때문에 직접 scanner를 구현했습니다.
 
-```sql
-INSERT INTO users (id, name, age) VALUES (1, 'alice', 20);
+### 2. Column-name INSERT와 schema 순서 맞추기
+
+`INSERT INTO users (name, id, age) VALUES ('alice', 1, 20);` 같은 입력은 SQL에 적힌 순서와 실제 CSV 헤더 순서가 다를 수 있습니다.  
+이를 해결하기 위해 schema를 기준으로 컬럼 인덱스를 찾아 값을 재배치한 뒤 append하도록 만들었습니다.
+
+### 3. CSV 자동 생성의 조건 통제
+
+schema가 있다고 해서 아무 경우에나 CSV를 새로 만들면 잘못된 데이터가 생길 수 있습니다.  
+그래서 다음 조건일 때만 auto-create를 허용했습니다.
+
+- schema 파일이 존재할 것
+- explicit column list INSERT일 것
+- schema의 모든 컬럼이 정확히 포함될 것
+
+### 4. 여러 문장 실행 시 출력과 데이터 일관성 맞추기
+
+데이터만 rollback되고 콘솔 출력은 이미 나가버리면 사용자는 성공처럼 오해할 수 있습니다.  
+이를 막기 위해 실행 결과도 임시 버퍼에 쌓아 두었다가 전체 성공 후에만 최종 출력하도록 설계했습니다.
+
+## 사용 방법
+
+### 실행 형식
+
+```bash
+./sql_processor <sql_file> [data_dir]
 ```
 
-### 2. 컬럼 이름 기반 매핑
+- `sql_file`: 실행할 SQL 스크립트 파일
+- `data_dir`: CSV와 schema 파일이 들어 있는 디렉터리
+- 생략 시 기본값은 `data/`
 
-명시적 컬럼 목록이 있으면 schema 기준 순서로 재정렬해서 저장합니다.
+### 예시
 
-```sql
-INSERT INTO users (name, id, age) VALUES ('alice', 1, 20);
+```bash
+./sql_processor queries/select_users.sql
+./sql_processor queries/select_user_names.sql
+./sql_processor queries/script_users_roundtrip.sql
 ```
 
-위 SQL도 실제 CSV에는 아래처럼 저장됩니다.
+### 빌드
 
-```csv
-id,name,age
-1,"alice",20
-```
-
-### 3. 타입 검증
-
-schema 파일이 있으면 컬럼별 타입을 검증합니다.
-
-- `INT` 컬럼에는 정수만 허용
-- `STRING` 컬럼에는 문자열만 허용
-
-타입이 맞지 않으면 실행 전체가 실패합니다.
-
-### 4. 특정 컬럼만 조회
-
-schema 파일이 있으면 projection SELECT를 지원합니다.
-
-```sql
-SELECT name, age FROM users;
-```
-
-출력도 선택한 컬럼만 포함합니다.
-
-```csv
-name,age
-"alice",20
-```
-
-### 5. 여러 SQL 문장 실행
-
-SQL 파일 하나에 여러 문장을 쓸 수 있습니다.
-
-```sql
-INSERT INTO users (id, name, age) VALUES (2, 'bob', 30);
-SELECT name, age FROM users;
-```
-
-실행 규칙:
-
-- 모든 문장이 성공해야 실제 CSV가 변경됩니다.
-- 중간에 하나라도 실패하면 전체를 rollback 합니다.
-- `SELECT` 출력과 `INSERT` 성공 메시지도 전체 성공 후에만 출력합니다.
-
-## CSV 저장 규칙
-
-- 첫 줄은 헤더입니다.
-- 문자열은 항상 큰따옴표로 저장합니다.
-- 문자열 내부 큰따옴표는 `""`로 escape 합니다.
-- 정수는 따옴표 없이 저장합니다.
-
-예시:
-
-- SQL: `INSERT INTO users VALUES (1, 'a,b"c', 20);`
-- CSV row: `1,"a,b""c",20`
-
-## 샘플 파일
-
-- `data/users.csv`
-  - 기본 데모 데이터
-- `data/users.schema.csv`
-  - `users.csv`용 schema
-- `queries/insert_users.sql`
-  - 기존 positional INSERT 예제
-- `queries/insert_users_with_columns.sql`
-  - 컬럼 이름 기반 INSERT 예제
-- `queries/select_users.sql`
-  - `SELECT *` 예제
-- `queries/select_user_names.sql`
-  - projection SELECT 예제
-- `queries/script_users_roundtrip.sql`
-  - multi-statement 예제
-
-## 프로젝트 구조
-
-- `include/sql_processor.h`
-  - 우산 헤더
-- `include/sql_types.h`
-  - `Statement`, `SqlScript`, `SqlValue`
-- `include/parse.h`
-  - `parse_sql`, `parse_sql_script`
-- `include/execute.h`
-  - `execute_statement`, `execute_script`
-- `include/storage.h`
-  - schema-aware CSV 저장/조회 API
-- `src/parser.c`
-  - 수동 스캐너 기반 SQL 파서
-- `src/statement.c`
-  - AST 초기화/정리
-- `src/execute.c`
-  - multi-statement 실행, staging, rollback
-- `src/storage.c`
-  - CSV/schema 읽기, 타입 검증, projection SELECT
-- `tests/test_parser.c`
-  - 파서 + Phase 3 실행 통합 테스트
-
-## 빌드와 테스트
-
-기본 기준은 `Makefile`입니다.
+기본 빌드 도구는 `Makefile`입니다.
 
 ```bash
 make clean all
+```
+
+### 테스트
+
+```bash
 make test
 ```
 
-현재 Windows 로컬 환경에서는 한글 경로 때문에 `mingw32-make`보다 `gcc` 직접 호출이 더 안정적일 수 있습니다.
+### 샘플 데이터와 쿼리
 
-직접 빌드 예시:
+- `data/users.csv`
+- `data/users.schema.csv`
+- `queries/insert_users.sql`
+- `queries/insert_users_with_columns.sql`
+- `queries/select_users.sql`
+- `queries/select_user_names.sql`
+- `queries/script_users_roundtrip.sql`
 
-```powershell
-& "C:\Program Files (x86)\Dev-Cpp\MinGW64\bin\gcc.exe" -std=c11 -Wall -Wextra -Wpedantic -Iinclude -g -o sql_processor.exe src\main.c src\parser.c src\statement.c src\sql_error.c src\execute.c src\storage.c
-& "C:\Program Files (x86)\Dev-Cpp\MinGW64\bin\gcc.exe" -std=c11 -Wall -Wextra -Wpedantic -Iinclude -g -o test_parser.exe tests\test_parser.c src\parser.c src\statement.c src\sql_error.c src\execute.c src\storage.c
-.\test_parser.exe
+### 지원 범위
+
+현재 지원 범위는 다음과 같습니다.
+
+- `INSERT`
+- `SELECT`
+- explicit column INSERT
+- projection SELECT
+- multi-statement script
+- schema 기반 타입 검증
+
+현재 지원하지 않는 기능은 다음과 같습니다.
+
+- `WHERE`
+- `NULL`
+- `UPDATE`, `DELETE`
+- 집계, 정렬, 조인
+
+## 프로젝트 구조
+
+```text
+include/
+  execute.h
+  parse.h
+  sql_common.h
+  sql_error.h
+  sql_processor.h
+  sql_types.h
+  storage.h
+src/
+  main.c
+  parser.c
+  statement.c
+  sql_error.c
+  execute.c
+  storage.c
+tests/
+  test_parser.c
+data/
+queries/
+docs/
 ```
-
-## CI/CD
-
-- CI
-  - GitHub Actions가 `push`와 `pull_request`에서 빌드와 테스트를 수행합니다.
-- CD
-  - `v*` 태그를 푸시하면 릴리스 번들을 생성합니다.
-
-## 학습 순서 추천
-
-1. `include/sql_types.h`
-2. `src/parser.c`
-3. `src/statement.c`
-4. `src/main.c`
-5. `src/execute.c`
-6. `src/storage.c`
-7. `tests/test_parser.c`
-
-Phase 3에서는 특히 아래 질문을 붙여서 보면 좋습니다.
-
-- 컬럼 이름 INSERT가 schema 순서로 어떻게 재배열되는가
-- projection SELECT가 어떤 기준으로 컬럼을 고르는가
-- 여러 문장을 실행할 때 왜 staging이 필요한가
-- rollback이 어느 시점에 보장되는가

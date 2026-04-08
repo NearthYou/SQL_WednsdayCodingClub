@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SQL Processor Flow</title>
+  <style>
+    :root {
+      --bg-1: #f4efe6;
+      --bg-2: #dce9e2;
+      --ink: #1f2937;
+      --muted: #5b6470;
+      --line: rgba(31, 41, 55, 0.14);
+      --panel: rgba(255, 255, 255, 0.8);
+      --shadow: 0 24px 48px rgba(43, 60, 74, 0.14);
+      --teal: #0f766e;
+      --orange: #dd6b20;
+      --navy: #1d4ed8;
+      --rose: #be185d;
+      --olive: #4d7c0f;
+      --gold: #b7791f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(221, 107, 32, 0.18), transparent 24%),
+        radial-gradient(circle at 90% 12%, rgba(29, 78, 216, 0.18), transparent 22%),
+        linear-gradient(135deg, var(--bg-1), var(--bg-2));
+      overflow: hidden;
+    }
+
+    .canvas {
+      width: 1600px;
+      height: 900px;
+      margin: 0 auto;
+      padding: 42px 52px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .canvas::before,
+    .canvas::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      filter: blur(12px);
+      opacity: 0.35;
+    }
+
+    .canvas::before {
+      width: 260px;
+      height: 260px;
+      background: rgba(15, 118, 110, 0.14);
+      top: -80px;
+      right: 72px;
+    }
+
+    .canvas::after {
+      width: 220px;
+      height: 220px;
+      background: rgba(190, 24, 93, 0.1);
+      bottom: -40px;
+      left: 40px;
+    }
+
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 20px;
+      gap: 32px;
+    }
+
+    .hero-copy {
+      max-width: 980px;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      color: var(--teal);
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      margin-bottom: 12px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 50px;
+      line-height: 1.08;
+      letter-spacing: -0.04em;
+    }
+
+    .hero p {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
+    .summary {
+      min-width: 320px;
+      padding: 20px 22px;
+      border-radius: 26px;
+      background: rgba(255, 255, 255, 0.76);
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    .summary h2 {
+      margin: 0 0 12px;
+      font-size: 22px;
+    }
+
+    .summary ul {
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.65;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px 18px;
+      position: relative;
+      margin-top: 20px;
+    }
+
+    .card {
+      position: relative;
+      min-height: 180px;
+      padding: 20px 20px 18px;
+      border-radius: 30px;
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    .card::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 30px;
+      border: 1px solid rgba(31, 41, 55, 0.06);
+      pointer-events: none;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      font-size: 15px;
+      font-weight: 700;
+      color: white;
+    }
+
+    .teal { background: var(--teal); }
+    .orange { background: var(--orange); }
+    .navy { background: var(--navy); }
+    .rose { background: var(--rose); }
+    .olive { background: var(--olive); }
+    .gold { background: var(--gold); }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 24px;
+      letter-spacing: -0.03em;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.5;
+    }
+
+    .mini-list {
+      margin-top: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .mini-list span {
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(31, 41, 55, 0.06);
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .arrow-row {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 74px;
+      height: 0;
+      pointer-events: none;
+    }
+
+    .arrow-row.bottom {
+      top: 270px;
+    }
+
+    .arrow {
+      position: absolute;
+      height: 4px;
+      background: linear-gradient(90deg, rgba(31, 41, 55, 0.18), rgba(31, 41, 55, 0.42));
+      border-radius: 999px;
+    }
+
+    .arrow::after {
+      content: "";
+      position: absolute;
+      right: -2px;
+      top: -5px;
+      border-top: 7px solid transparent;
+      border-bottom: 7px solid transparent;
+      border-left: 12px solid rgba(31, 41, 55, 0.42);
+    }
+
+    .arrow.a { left: 31.5%; width: 11.2%; }
+    .arrow.b { left: 64.6%; width: 11.2%; }
+    .arrow.c { left: 31.5%; width: 11.2%; }
+    .arrow.d { left: 64.6%; width: 11.2%; }
+
+    .guide {
+      margin-top: 18px;
+      padding: 16px 20px;
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.62);
+      box-shadow: var(--shadow);
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .guide strong {
+      font-size: 18px;
+    }
+
+    .guide p {
+      margin: 0;
+      font-size: 16px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+  </style>
+</head>
+<body>
+  <main class="canvas">
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow">SQL Processor Project Flow</div>
+        <h1>하나의 SQL 파일이<br>파싱, 실행, 검증, 반영까지 이어지는 흐름</h1>
+        <p>사용자가 SQL 스크립트를 입력하면 parser가 문장을 분석하고, executor가 staging 환경에서 안전하게 실행한 뒤, storage가 CSV와 schema 규칙에 맞춰 결과를 저장하거나 조회합니다.</p>
+      </div>
+      <aside class="summary">
+        <h2>핵심 축</h2>
+        <ul>
+          <li>Manual scanner 기반 SQL 파싱</li>
+          <li>Statement / SqlScript AST 구성</li>
+          <li>CSV + schema.csv 저장소 모델</li>
+          <li>Staging, commit, rollback 실행 보장</li>
+        </ul>
+      </aside>
+    </section>
+
+    <div class="flow">
+      <div class="arrow-row">
+        <div class="arrow a"></div>
+        <div class="arrow b"></div>
+      </div>
+      <div class="arrow-row bottom">
+        <div class="arrow c"></div>
+        <div class="arrow d"></div>
+      </div>
+
+      <article class="card">
+        <div class="tag teal">01 입력</div>
+        <h3>SQL 파일 로드</h3>
+        <p><code>main.c</code>가 SQL 파일 전체를 읽고 실행할 데이터 디렉터리를 결정합니다.</p>
+        <div class="mini-list">
+          <span>queries/*.sql</span>
+          <span>data/</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="tag orange">02 파싱</div>
+        <h3>구문 해석</h3>
+        <p><code>parser.c</code>가 키워드, 식별자, 값, 세미콜론 경계를 직접 스캔해 SQL 문장을 AST로 만듭니다.</p>
+        <div class="mini-list">
+          <span>INSERT</span>
+          <span>SELECT</span>
+          <span>multi-statement</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="tag navy">03 AST</div>
+        <h3>Statement / SqlScript</h3>
+        <p>파싱 결과는 타입, 대상 테이블, 컬럼 목록, 리터럴 값을 담는 구조체로 정리됩니다.</p>
+        <div class="mini-list">
+          <span>schema.table</span>
+          <span>values</span>
+          <span>projection</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="tag rose">04 실행기</div>
+        <h3>Staging 실행</h3>
+        <p><code>execute.c</code>가 INSERT가 포함된 스크립트를 임시 staging 디렉터리에서 먼저 실행합니다.</p>
+        <div class="mini-list">
+          <span>buffered output</span>
+          <span>safe commit</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="tag olive">05 저장소</div>
+        <h3>CSV / Schema 처리</h3>
+        <p><code>storage.c</code>가 schema 검증, 컬럼 재정렬, CSV append, projection SELECT를 담당합니다.</p>
+        <div class="mini-list">
+          <span>users.csv</span>
+          <span>users.schema.csv</span>
+          <span>type check</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="tag gold">06 결과</div>
+        <h3>출력과 반영</h3>
+        <p>모든 문장이 성공하면 결과를 출력하고 CSV를 commit합니다. 중간 실패가 나면 rollback으로 원본을 유지합니다.</p>
+        <div class="mini-list">
+          <span>SELECT result</span>
+          <span>commit</span>
+          <span>rollback</span>
+        </div>
+      </article>
+    </div>
+
+    <section class="guide">
+      <strong>Flow Rule</strong>
+      <p><b>INSERT</b>는 staging에 먼저 기록되고, 같은 스크립트 안의 <b>SELECT</b>는 그 staged 결과를 읽습니다. 전체가 성공했을 때만 원본 CSV가 갱신됩니다.</p>
+    </section>
+  </main>
+</body>
+</html>
