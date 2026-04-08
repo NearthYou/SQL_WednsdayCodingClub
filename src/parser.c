@@ -44,6 +44,15 @@ static void skip_whitespace(Parser *parser) {
     }
 }
 
+static void skip_utf8_bom(Parser *parser) {
+    if (parser->length >= 3 &&
+        (unsigned char) parser->input[0] == 0xEF &&
+        (unsigned char) parser->input[1] == 0xBB &&
+        (unsigned char) parser->input[2] == 0xBF) {
+        parser->pos = 3;
+    }
+}
+
 static char *copy_substring(const char *start, size_t length) {
     char *buffer;
 
@@ -408,7 +417,9 @@ int parse_sql(const char *sql, Statement *out, SqlError *err) {
     parser.length = strlen(sql);
     parser.pos = 0;
 
-    first_non_space = 0;
+    skip_utf8_bom(&parser);
+
+    first_non_space = parser.pos;
     while (first_non_space < parser.length &&
            isspace((unsigned char) sql[first_non_space])) {
         first_non_space++;

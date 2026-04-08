@@ -200,6 +200,21 @@ static int test_insert_negative_integer(void) {
     return 0;
 }
 
+static int test_insert_with_utf8_bom(void) {
+    const char *sql = "\xEF\xBB\xBFINSERT INTO users VALUES (11, '홍길동', 44);";
+    Statement stmt;
+    SqlError err;
+
+    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
+    CHECK(stmt.type == STMT_INSERT);
+    CHECK(strcmp(stmt.table, "users") == 0);
+    CHECK(stmt.value_count == 3);
+    CHECK(stmt.values[1].type == SQL_VALUE_STRING);
+    CHECK(strcmp(stmt.values[1].as.string_value, "홍길동") == 0);
+    statement_free(&stmt);
+    return 0;
+}
+
 static int test_fail_missing_semicolon(void) {
     const char *sql = "SELECT * FROM users";
     Statement stmt;
@@ -506,6 +521,7 @@ int main(void) {
         { "insert_simple", test_insert_simple },
         { "select_schema_with_whitespace", test_select_schema_with_whitespace },
         { "insert_negative_integer", test_insert_negative_integer },
+        { "insert_with_utf8_bom", test_insert_with_utf8_bom },
         { "fail_missing_semicolon", test_fail_missing_semicolon },
         { "fail_column_list", test_fail_column_list },
         { "fail_unterminated_string", test_fail_unterminated_string },

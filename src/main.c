@@ -7,6 +7,7 @@
 #include <stdlib.h>
 
 #ifdef _WIN32
+#include <windows.h>
 #define SIZE_T_FMT "%Iu"
 #else
 #define SIZE_T_FMT "%zu"
@@ -70,6 +71,11 @@ int main(int argc, char **argv) {
     char *sql_text;
     Statement stmt;
     SqlError err;
+
+#ifdef _WIN32
+    /* Windows 콘솔에서 UTF-8 CSV/문자열을 그대로 볼 수 있게 코드 페이지를 맞춘다. */
+    SetConsoleOutputCP(CP_UTF8);
+#endif
 
     if (argc < 2 || argc > 3) {
         fprintf(stderr, "Usage: %s <sql_file> [data_dir]\n", argv[0]);
