@@ -55,17 +55,22 @@ static void table_schema_init(TableSchema *schema) {
 }
 
 static void table_schema_free(TableSchema *schema) {
+    SchemaColumn *columns;
+    size_t count;
     size_t i;
 
     if (schema == NULL) {
         return;
     }
 
-    for (i = 0; i < schema->count; ++i) {
-        free(schema->columns[i].name);
+    columns = schema->columns;
+    count = (columns != NULL) ? schema->count : 0;
+
+    for (i = 0; i < count; ++i) {
+        free(columns[i].name);
     }
 
-    free(schema->columns);
+    free(columns);
     table_schema_init(schema);
 }
 
@@ -837,6 +842,12 @@ static int write_csv_value(FILE *file,
     return write_signed_integer(file, value->as.int_value, err, csv_path);
 }
 
+static void cleanup_created_csv(const char *csv_path) {
+    if (csv_path != NULL) {
+        remove(csv_path);
+    }
+}
+
 static int append_newline_if_needed(FILE *file, const char *csv_path, SqlError *err) {
     long end_pos;
 
@@ -1077,19 +1088,64 @@ static int map_values_to_schema(const TableSchema *schema,
     return SQL_SUCCESS;
 }
 
-static int copy_stream(FILE *input, FILE *out, const char *csv_path, SqlError *err) {
-    char buffer[4096];
-    size_t read_size;
+static int copy_stream_validated(FILE *input,
+                                 FILE *out,
+                                 const CsvRow *header_row,
+                                 const char *csv_path,
+                                 SqlError *err) {
+    size_t record_index;
 
-    while ((read_size = fread(buffer, 1u, sizeof(buffer), input)) > 0) {
-        if (fwrite(buffer, 1u, read_size, out) != read_size) {
+    record_index = 0;
+    while (1) {
+        char *record;
+        int read_result;
+
+        record = NULL;
+        read_result = read_csv_record(input, &record, err, csv_path);
+        if (read_result < 0) {
+            return SQL_FAILURE;
+        }
+
+        if (read_result == 0) {
+            break;
+        }
+
+        if (record_index > 0) {
+            CsvRow row;
+
+            csv_row_init(&row);
+            if (parse_csv_record(record, &row, err, csv_path) != SQL_SUCCESS) {
+                free(record);
+                return SQL_FAILURE;
+            }
+
+            if (row.count != header_row->count) {
+                csv_row_free(&row);
+                free(record);
+                sql_error_set(err,
+                              SQL_ERR_PARSE,
+                              0,
+                              "CSV row in '%s' has %u columns but header has %u",
+                              csv_path,
+                              (unsigned) row.count,
+                              (unsigned) header_row->count);
+                return SQL_FAILURE;
+            }
+            csv_row_free(&row);
+        }
+
+        if (fputs(record, out) == EOF || fputc('\n', out) == EOF) {
+            free(record);
             sql_error_set(err, SQL_ERR_IO, 0, "Failed to write SELECT result for '%s'", csv_path);
             return SQL_FAILURE;
         }
+
+        free(record);
+        record_index++;
     }
 
-    if (ferror(input)) {
-        sql_error_set(err, SQL_ERR_IO, 0, "Failed to read CSV file '%s' for SELECT", csv_path);
+    if (fflush(out) != 0) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to flush SELECT output for '%s'", csv_path);
         return SQL_FAILURE;
     }
 
@@ -1244,6 +1300,9 @@ int storage_append_row(const char *data_dir,
     }
 
     if (load_csv_header(csv_path, &header_row, &file, err) != SQL_SUCCESS) {
+        if (created_csv) {
+            cleanup_created_csv(csv_path);
+        }
         free(ordered_values);
         table_schema_free(&schema);
         free(csv_path);
@@ -1254,6 +1313,9 @@ int storage_append_row(const char *data_dir,
         if (header_matches_schema(&header_row, &schema, csv_path, err) != SQL_SUCCESS) {
             csv_row_free(&header_row);
             fclose(file);
+            if (created_csv) {
+                cleanup_created_csv(csv_path);
+            }
             free(ordered_values);
             table_schema_free(&schema);
             free(csv_path);
@@ -1269,6 +1331,9 @@ int storage_append_row(const char *data_dir,
                       csv_path,
                       (unsigned) header_row.count,
                       (unsigned) value_count);
+        if (created_csv) {
+            cleanup_created_csv(csv_path);
+        }
         table_schema_free(&schema);
         free(csv_path);
         return SQL_FAILURE;
@@ -1279,6 +1344,9 @@ int storage_append_row(const char *data_dir,
         free(ordered_values);
         table_schema_free(&schema);
         sql_error_set(err, SQL_ERR_IO, 0, "Failed to close CSV file '%s' after header validation", csv_path);
+        if (created_csv) {
+            cleanup_created_csv(csv_path);
+        }
         free(csv_path);
         return SQL_FAILURE;
     }
@@ -1288,6 +1356,9 @@ int storage_append_row(const char *data_dir,
         free(ordered_values);
         table_schema_free(&schema);
         sql_error_set(err, SQL_ERR_IO, 0, "Failed to reopen CSV file '%s' for append", csv_path);
+        if (created_csv) {
+            cleanup_created_csv(csv_path);
+        }
         free(csv_path);
         return SQL_FAILURE;
     }
@@ -1300,10 +1371,12 @@ int storage_append_row(const char *data_dir,
                                 err);
 
     fclose(file);
+    if (result != SQL_SUCCESS && created_csv) {
+        cleanup_created_csv(csv_path);
+    }
     free(ordered_values);
     table_schema_free(&schema);
     free(csv_path);
-    (void) created_csv;
     return result;
 }
 
@@ -1373,7 +1446,7 @@ int storage_select_projection(const char *data_dir,
             return SQL_FAILURE;
         }
 
-        result = copy_stream(file, out, csv_path, err);
+        result = copy_stream_validated(file, out, &header_row, csv_path, err);
         csv_row_free(&header_row);
         fclose(file);
         table_schema_free(&schema);

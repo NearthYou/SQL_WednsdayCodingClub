@@ -14,27 +14,36 @@ void statement_init(Statement *stmt) {
 
 /* Statement가 소유한 모든 힙 메모리를 한 곳에서 해제한다. */
 void statement_free(Statement *stmt) {
+    char **columns;
+    SqlValue *values;
+    size_t column_count;
+    size_t value_count;
     size_t i;
 
     if (stmt == NULL) {
         return;
     }
 
+    columns = stmt->columns;
+    values = stmt->values;
+    column_count = (columns != NULL) ? stmt->column_count : 0;
+    value_count = (values != NULL) ? stmt->value_count : 0;
+
     free(stmt->schema);
     free(stmt->table);
 
-    for (i = 0; i < stmt->column_count; ++i) {
-        free(stmt->columns[i]);
+    for (i = 0; i < column_count; ++i) {
+        free(columns[i]);
     }
-    free(stmt->columns);
+    free(columns);
 
-    for (i = 0; i < stmt->value_count; ++i) {
-        if (stmt->values[i].type == SQL_VALUE_STRING) {
-            free(stmt->values[i].as.string_value);
+    for (i = 0; i < value_count; ++i) {
+        if (values[i].type == SQL_VALUE_STRING) {
+            free(values[i].as.string_value);
         }
     }
 
-    free(stmt->values);
+    free(values);
     statement_init(stmt);
 }
 

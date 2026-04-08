@@ -223,6 +223,34 @@ static int copy_file_bytes(const char *source_path, const char *target_path, Sql
     return SQL_SUCCESS;
 }
 
+static int move_file_path(const char *source_path, const char *target_path, SqlError *err, const char *context) {
+    if (rename(source_path, target_path) != 0) {
+        sql_error_set(err,
+                      SQL_ERR_IO,
+                      0,
+                      "Failed to move %s '%s' -> '%s'",
+                      context,
+                      source_path,
+                      target_path);
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int remove_file_if_exists(const char *path, SqlError *err, const char *context) {
+    if (!file_exists(path)) {
+        return SQL_SUCCESS;
+    }
+
+    if (remove(path) != 0) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to remove %s '%s'", context, path);
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
+}
+
 static int create_stage_dir(char **out_stage_dir, const char *data_dir, SqlError *err) {
     int attempt;
 
@@ -331,7 +359,9 @@ static void cleanup_stage_dir(const char *stage_dir, StringList *managed_files) 
         }
     }
 
-    REMOVE_DIR(stage_dir);
+    if (REMOVE_DIR(stage_dir) != 0) {
+        /* Stage cleanup is best-effort after execution completes. */
+    }
 }
 
 static int ensure_staged_table(const char *stage_dir,
@@ -426,7 +456,7 @@ static int flush_and_copy_output(FILE *buffer, FILE *out, SqlError *err) {
     return SQL_SUCCESS;
 }
 
-int execute_statement(const Statement *stmt, const char *data_dir, FILE *out, SqlError *err) {
+static int execute_statement_unstaged(const Statement *stmt, const char *data_dir, FILE *out, SqlError *err) {
     if (err == NULL) {
         return SQL_FAILURE;
     }
@@ -481,33 +511,71 @@ int execute_statement(const Statement *stmt, const char *data_dir, FILE *out, Sq
     return SQL_FAILURE;
 }
 
+int execute_statement(const Statement *stmt, const char *data_dir, FILE *out, SqlError *err) {
+    SqlScript script;
+
+    if (err == NULL) {
+        return SQL_FAILURE;
+    }
+
+    sql_error_clear(err);
+    if (stmt == NULL || data_dir == NULL || out == NULL) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "stmt, data_dir, and out are required");
+        return SQL_FAILURE;
+    }
+
+    script.statements = (Statement *) stmt;
+    script.statement_count = 1;
+    return execute_script(&script, data_dir, out, err);
+}
+
 static int rollback_committed_csvs(const char *data_dir,
                                    const char *stage_dir,
                                    const StringList *touched_csvs,
                                    const StringList *backup_names,
                                    const unsigned char *had_original,
-                                   size_t committed_count) {
+                                   size_t committed_count,
+                                   SqlError *err) {
     size_t i;
 
-    for (i = 0; i < committed_count; ++i) {
-        SqlError ignored_err;
+    for (i = committed_count; i > 0; --i) {
+        size_t index;
+        SqlError local_err;
         char *target_path;
         char *backup_path;
 
-        sql_error_clear(&ignored_err);
+        index = i - 1;
+        sql_error_clear(&local_err);
         target_path = NULL;
         backup_path = NULL;
-        if (join_dir_file(&target_path, data_dir, touched_csvs->items[i], &ignored_err) != SQL_SUCCESS) {
+        if (join_dir_file(&target_path, data_dir, touched_csvs->items[index], &local_err) != SQL_SUCCESS) {
             free(target_path);
-            continue;
+            if (err != NULL) {
+                *err = local_err;
+            }
+            return SQL_FAILURE;
         }
 
-        if (had_original[i]) {
-            if (join_dir_file(&backup_path, stage_dir, backup_names->items[i], &ignored_err) == SQL_SUCCESS) {
-                copy_file_bytes(backup_path, target_path, &ignored_err, "rollback");
+        if (had_original[index]) {
+            if (join_dir_file(&backup_path, stage_dir, backup_names->items[index], &local_err) != SQL_SUCCESS ||
+                remove_file_if_exists(target_path, &local_err, "partially committed CSV") != SQL_SUCCESS ||
+                move_file_path(backup_path, target_path, &local_err, "rollback restore") != SQL_SUCCESS) {
+                free(target_path);
+                free(backup_path);
+                if (err != NULL) {
+                    *err = local_err;
+                }
+                return SQL_FAILURE;
             }
         } else {
-            remove(target_path);
+            if (remove_file_if_exists(target_path, &local_err, "newly committed CSV") != SQL_SUCCESS) {
+                free(target_path);
+                free(backup_path);
+                if (err != NULL) {
+                    *err = local_err;
+                }
+                return SQL_FAILURE;
+            }
         }
 
         free(target_path);
@@ -521,12 +589,19 @@ static int commit_staged_csvs(const char *stage_dir,
                               const char *data_dir,
                               StringList *touched_csvs,
                               StringList *managed_files,
+                              StringList *backup_names,
+                              unsigned char **out_had_original,
                               SqlError *err) {
-    StringList backup_names;
     unsigned char *had_original;
     size_t i;
 
-    string_list_init(&backup_names);
+    if (backup_names == NULL || out_had_original == NULL) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Commit bookkeeping outputs are required");
+        return SQL_FAILURE;
+    }
+
+    string_list_init(backup_names);
+    *out_had_original = NULL;
     had_original = NULL;
 
     if (touched_csvs->count > 0) {
@@ -540,69 +615,117 @@ static int commit_staged_csvs(const char *stage_dir,
     for (i = 0; i < touched_csvs->count; ++i) {
         char *source_path;
         char *target_path;
+        char *backup_path;
+        char *temp_path;
         char backup_name[96];
+        char temp_name[96];
 
         source_path = NULL;
         target_path = NULL;
+        backup_path = NULL;
+        temp_path = NULL;
         snprintf(backup_name, sizeof(backup_name), "__rollback_%u.csv", (unsigned) i);
+        snprintf(temp_name, sizeof(temp_name), "__commit_%u.csv", (unsigned) i);
 
-        if (append_unique_string(&backup_names, backup_name, err, "rollback backup") != SQL_SUCCESS ||
+        if (append_unique_string(backup_names, backup_name, err, "rollback backup") != SQL_SUCCESS ||
             append_unique_string(managed_files, backup_name, err, "stage file") != SQL_SUCCESS ||
+            append_unique_string(managed_files, temp_name, err, "stage file") != SQL_SUCCESS ||
             join_dir_file(&source_path, stage_dir, touched_csvs->items[i], err) != SQL_SUCCESS ||
-            join_dir_file(&target_path, data_dir, touched_csvs->items[i], err) != SQL_SUCCESS) {
+            join_dir_file(&target_path, data_dir, touched_csvs->items[i], err) != SQL_SUCCESS ||
+            join_dir_file(&backup_path, stage_dir, backup_name, err) != SQL_SUCCESS ||
+            join_dir_file(&temp_path, stage_dir, temp_name, err) != SQL_SUCCESS) {
             free(source_path);
             free(target_path);
+            free(backup_path);
+            free(temp_path);
             free(had_original);
-            string_list_free(&backup_names);
+            string_list_free(backup_names);
+            return SQL_FAILURE;
+        }
+
+        if (copy_file_bytes(source_path, temp_path, err, "commit staging") != SQL_SUCCESS) {
+            free(source_path);
+            free(target_path);
+            free(backup_path);
+            free(temp_path);
+            free(had_original);
+            string_list_free(backup_names);
             return SQL_FAILURE;
         }
 
         if (file_exists(target_path)) {
-            char *backup_path;
-
-            backup_path = NULL;
             had_original[i] = 1;
-            if (join_dir_file(&backup_path, stage_dir, backup_names.items[i], err) != SQL_SUCCESS ||
-                copy_file_bytes(target_path, backup_path, err, "rollback backup") != SQL_SUCCESS) {
+            if (move_file_path(target_path, backup_path, err, "rollback backup") != SQL_SUCCESS) {
                 free(source_path);
                 free(target_path);
                 free(backup_path);
+                free(temp_path);
                 free(had_original);
-                string_list_free(&backup_names);
+                string_list_free(backup_names);
                 return SQL_FAILURE;
             }
-            free(backup_path);
         }
 
-        if (copy_file_bytes(source_path, target_path, err, "commit") != SQL_SUCCESS) {
-            rollback_committed_csvs(data_dir,
-                                    stage_dir,
-                                    touched_csvs,
-                                    &backup_names,
-                                    had_original,
-                                    i + 1);
+        if (move_file_path(temp_path, target_path, err, "commit replace") != SQL_SUCCESS) {
+            SqlError rollback_err;
+
+            sql_error_clear(&rollback_err);
+            if (had_original[i] &&
+                move_file_path(backup_path, target_path, &rollback_err, "rollback restore") != SQL_SUCCESS) {
+                free(source_path);
+                free(target_path);
+                free(backup_path);
+                free(temp_path);
+                free(had_original);
+                string_list_free(backup_names);
+                *err = rollback_err;
+                return SQL_FAILURE;
+            }
+
+            if (rollback_committed_csvs(data_dir,
+                                        stage_dir,
+                                        touched_csvs,
+                                        backup_names,
+                                        had_original,
+                                        i,
+                                        &rollback_err) != SQL_SUCCESS) {
+                free(source_path);
+                free(target_path);
+                free(backup_path);
+                free(temp_path);
+                free(had_original);
+                string_list_free(backup_names);
+                *err = rollback_err;
+                return SQL_FAILURE;
+            }
+
             free(source_path);
             free(target_path);
+            free(backup_path);
+            free(temp_path);
             free(had_original);
-            string_list_free(&backup_names);
+            string_list_free(backup_names);
             return SQL_FAILURE;
         }
 
         free(source_path);
         free(target_path);
+        free(backup_path);
+        free(temp_path);
     }
 
-    free(had_original);
-    string_list_free(&backup_names);
+    *out_had_original = had_original;
     return SQL_SUCCESS;
 }
 
 int execute_script(const SqlScript *script, const char *data_dir, FILE *out, SqlError *err) {
     StringList touched_csvs;
     StringList managed_files;
+    StringList commit_backup_names;
     FILE *buffer;
     char *buffer_path;
     char *stage_dir;
+    unsigned char *commit_had_original;
     const char *exec_dir;
     int needs_staging;
     size_t i;
@@ -632,9 +755,11 @@ int execute_script(const SqlScript *script, const char *data_dir, FILE *out, Sql
 
     string_list_init(&touched_csvs);
     string_list_init(&managed_files);
+    string_list_init(&commit_backup_names);
     buffer = NULL;
     buffer_path = NULL;
     stage_dir = NULL;
+    commit_had_original = NULL;
     exec_dir = data_dir;
 
     if (needs_staging) {
@@ -671,7 +796,7 @@ int execute_script(const SqlScript *script, const char *data_dir, FILE *out, Sql
             return SQL_FAILURE;
         }
 
-        if (execute_statement(stmt, exec_dir, buffer, err) != SQL_SUCCESS) {
+        if (execute_statement_unstaged(stmt, exec_dir, buffer, err) != SQL_SUCCESS) {
             fclose(buffer);
             remove(buffer_path);
             free(buffer_path);
@@ -703,23 +828,50 @@ int execute_script(const SqlScript *script, const char *data_dir, FILE *out, Sql
         }
     }
 
-    if (needs_staging && commit_staged_csvs(stage_dir, data_dir, &touched_csvs, &managed_files, err) != SQL_SUCCESS) {
+    if (needs_staging &&
+        commit_staged_csvs(stage_dir,
+                           data_dir,
+                           &touched_csvs,
+                           &managed_files,
+                           &commit_backup_names,
+                           &commit_had_original,
+                           err) != SQL_SUCCESS) {
         fclose(buffer);
         remove(buffer_path);
         free(buffer_path);
         cleanup_stage_dir(stage_dir, &managed_files);
         free(stage_dir);
+        string_list_free(&commit_backup_names);
+        free(commit_had_original);
         string_list_free(&managed_files);
         string_list_free(&touched_csvs);
         return SQL_FAILURE;
     }
 
     if (flush_and_copy_output(buffer, out, err) != SQL_SUCCESS) {
+        if (needs_staging) {
+            SqlError rollback_err;
+
+            sql_error_clear(&rollback_err);
+            if (rollback_committed_csvs(data_dir,
+                                        stage_dir,
+                                        &touched_csvs,
+                                        &commit_backup_names,
+                                        commit_had_original,
+                                        touched_csvs.count,
+                                        &rollback_err) == SQL_SUCCESS) {
+                /* Keep the original output error when data rollback succeeds. */
+            } else {
+                *err = rollback_err;
+            }
+        }
         fclose(buffer);
         remove(buffer_path);
         free(buffer_path);
         cleanup_stage_dir(stage_dir, &managed_files);
         free(stage_dir);
+        string_list_free(&commit_backup_names);
+        free(commit_had_original);
         string_list_free(&managed_files);
         string_list_free(&touched_csvs);
         return SQL_FAILURE;
@@ -730,6 +882,8 @@ int execute_script(const SqlScript *script, const char *data_dir, FILE *out, Sql
     free(buffer_path);
     cleanup_stage_dir(stage_dir, &managed_files);
     free(stage_dir);
+    string_list_free(&commit_backup_names);
+    free(commit_had_original);
     string_list_free(&managed_files);
     string_list_free(&touched_csvs);
     return SQL_SUCCESS;
