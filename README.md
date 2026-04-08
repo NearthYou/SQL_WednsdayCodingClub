@@ -103,33 +103,6 @@ flowchart TD
 
 ---
 
-## 핵심 기능
-
-<table>
-  <tr>
-    <td align="center" width="33%">
-      <b>Parser</b><br/><br/>
-      Keyword Parsing<br/>
-      String Escape <code>''</code><br/>
-      AST Build
-    </td>
-    <td align="center" width="33%">
-      <b>Execution</b><br/><br/>
-      Multi-Statement<br/>
-      Buffered Output<br/>
-      Atomic-Like Flow
-    </td>
-    <td align="center" width="33%">
-      <b>Storage</b><br/><br/>
-      CSV Auto Create<br/>
-      Column Reordering<br/>
-      Type Validation
-    </td>
-  </tr>
-</table>
-
----
-
 ## 강점 및 한계
 
 | 강점 | 한계 |
@@ -137,7 +110,6 @@ flowchart TD
 | SQL 처리 흐름이 코드로 선명하다 | 실제 DB 엔진은 아니다 |
 | AST 기반으로 구조가 명확하다 | `WHERE`, `JOIN`, `UPDATE` 미지원 |
 | CSV인데도 schema 검증이 된다 | CSV 자체의 확장성 한계 |
-| Rollback 개념까지 직접 보여줄 수 있다 | 학습성 우선, 성능 최적화 아님 |
 
 ---
 
@@ -147,7 +119,7 @@ flowchart TD
   <tr>
     <td align="center" width="33%">
       <b>INSERT</b><br/>
-      컬럼 이름 기반 매핑
+      컬럼 기반 매핑
     </td>
     <td align="center" width="33%">
       <b>SELECT</b><br/>
@@ -155,7 +127,7 @@ flowchart TD
     </td>
     <td align="center" width="33%">
       <b>ROLLBACK</b><br/>
-      실패 시 전체 취소
+      실패시 전체 취소
     </td>
   </tr>
 </table>
