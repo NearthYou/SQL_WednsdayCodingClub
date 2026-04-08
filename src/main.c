@@ -1,3 +1,4 @@
+#include "execute.h"
 #include "parse.h"
 #include "sql_error.h"
 #include "sql_types.h"
@@ -6,11 +7,7 @@
 #include <stdlib.h>
 
 #ifdef _WIN32
-#define SIZE_T_FMT "%Iu"
-#define LONG_LONG_FMT "%I64d"
-#else
-#define SIZE_T_FMT "%zu"
-#define LONG_LONG_FMT "%lld"
+#include <windows.h>
 #endif
 
 /* SQL 파일 전체를 메모리에 올려 parser가 한 번에 읽을 수 있게 한다. */
@@ -65,49 +62,17 @@ static char *read_entire_file(const char *path, SqlError *err) {
     return buffer;
 }
 
-/* 사람이 읽을 수 있는 요약 형태로 AST를 출력한다. */
-static void print_target(const Statement *stmt) {
-    if (stmt->schema != NULL) {
-        printf("Target: %s.%s\n", stmt->schema, stmt->table);
-    } else {
-        printf("Target: %s\n", stmt->table);
-    }
-}
-
-static void print_values(const Statement *stmt) {
-    size_t i;
-
-    printf("Values (" SIZE_T_FMT "):\n", stmt->value_count);
-    for (i = 0; i < stmt->value_count; ++i) {
-        if (stmt->values[i].type == SQL_VALUE_INT) {
-            printf("  [" SIZE_T_FMT "] INT " LONG_LONG_FMT "\n",
-                   i,
-                   stmt->values[i].as.int_value);
-        } else {
-            printf("  [" SIZE_T_FMT "] STRING '%s'\n",
-                   i,
-                   stmt->values[i].as.string_value);
-        }
-    }
-}
-
-static void print_statement_summary(const Statement *stmt, const char *data_dir) {
-    printf("Parse succeeded.\n");
-    printf("Statement: %s\n", statement_type_name(stmt->type));
-    printf("Data directory: %s\n", data_dir);
-    print_target(stmt);
-
-    if (stmt->type == STMT_INSERT) {
-        print_values(stmt);
-    }
-}
-
 int main(int argc, char **argv) {
     const char *sql_path;
     const char *data_dir;
     char *sql_text;
-    Statement stmt;
+    SqlScript script;
     SqlError err;
+
+#ifdef _WIN32
+    /* Windows 콘솔에서 UTF-8 CSV/문자열을 그대로 볼 수 있게 코드 페이지를 맞춘다. */
+    SetConsoleOutputCP(CP_UTF8);
+#endif
 
     if (argc < 2 || argc > 3) {
         fprintf(stderr, "Usage: %s <sql_file> [data_dir]\n", argv[0]);
@@ -124,20 +89,27 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    statement_init(&stmt);
-    if (parse_sql(sql_text, &stmt, &err) != SQL_SUCCESS) {
-        fprintf(stderr, "Parse error [%s] at position " SIZE_T_FMT ": %s\n",
+    sql_script_init(&script);
+    if (parse_sql_script(sql_text, &script, &err) != SQL_SUCCESS) {
+        fprintf(stderr, "Parse error [%s] at position %lu: %s\n",
                 sql_error_code_name(err.code),
-                err.position,
+                (unsigned long) err.position,
                 err.message);
+        sql_script_free(&script);
         free(sql_text);
         return EXIT_FAILURE;
     }
 
-    /* Phase 1은 파싱 결과 확인까지가 목적이므로 실행기로 넘기지 않는다. */
-    print_statement_summary(&stmt, data_dir);
+    if (execute_script(&script, data_dir, stdout, &err) != SQL_SUCCESS) {
+        fprintf(stderr, "Execution error [%s]: %s\n",
+                sql_error_code_name(err.code),
+                err.message);
+        sql_script_free(&script);
+        free(sql_text);
+        return EXIT_FAILURE;
+    }
 
-    statement_free(&stmt);
+    sql_script_free(&script);
     free(sql_text);
     return EXIT_SUCCESS;
 }

@@ -37,10 +37,27 @@ static char current_char(const Parser *parser) {
     return parser->input[parser->pos];
 }
 
+static char peek_char(const Parser *parser, size_t offset) {
+    if (parser->pos + offset >= parser->length) {
+        return '\0';
+    }
+
+    return parser->input[parser->pos + offset];
+}
+
 static void skip_whitespace(Parser *parser) {
     while (parser->pos < parser->length &&
            isspace((unsigned char) parser->input[parser->pos])) {
         parser->pos++;
+    }
+}
+
+static void skip_utf8_bom(Parser *parser) {
+    if (parser->length >= 3 &&
+        (unsigned char) parser->input[0] == 0xEF &&
+        (unsigned char) parser->input[1] == 0xBB &&
+        (unsigned char) parser->input[2] == 0xBF) {
+        parser->pos = 3;
     }
 }
 
@@ -57,6 +74,48 @@ static char *copy_substring(const char *start, size_t length) {
     }
     buffer[length] = '\0';
     return buffer;
+}
+
+static int append_char_to_buffer(char **buffer,
+                                 size_t *length,
+                                 size_t *capacity,
+                                 char ch,
+                                 SqlError *err,
+                                 size_t position,
+                                 const char *context) {
+    char *expanded;
+    size_t new_capacity;
+
+    if (*length + 1 >= *capacity) {
+        if (*capacity > SIZE_MAX / 2) {
+            sql_error_set(err, SQL_ERR_MEMORY, position, "Out of memory while reading %s", context);
+            return SQL_FAILURE;
+        }
+
+        new_capacity = (*capacity == 0) ? 16 : (*capacity * 2);
+        if (new_capacity <= *length + 1) {
+            if (*length > SIZE_MAX - 2) {
+                sql_error_set(err, SQL_ERR_MEMORY, position, "Out of memory while reading %s", context);
+                return SQL_FAILURE;
+            }
+
+            new_capacity = *length + 2;
+        }
+
+        expanded = (char *) realloc(*buffer, new_capacity);
+        if (expanded == NULL) {
+            sql_error_set(err, SQL_ERR_MEMORY, position, "Out of memory while reading %s", context);
+            return SQL_FAILURE;
+        }
+
+        *buffer = expanded;
+        *capacity = new_capacity;
+    }
+
+    (*buffer)[*length] = ch;
+    (*length)++;
+    (*buffer)[*length] = '\0';
+    return SQL_SUCCESS;
 }
 
 /* 예약어 뒤에 식별자가 바로 붙는 경우를 막아 정확한 키워드만 소비한다. */
@@ -125,6 +184,66 @@ static int parse_identifier(Parser *parser, char **out, SqlError *err) {
     }
 
     *out = name;
+    return SQL_SUCCESS;
+}
+
+static int append_name(char ***names, size_t *count, char *name, SqlError *err, size_t position) {
+    char **expanded;
+    size_t new_count;
+    size_t new_size;
+    size_t i;
+
+    for (i = 0; i < *count; ++i) {
+        if (strcmp((*names)[i], name) == 0) {
+            free(name);
+            sql_error_set(err, SQL_ERR_PARSE, position, "Duplicate identifier in column list");
+            return SQL_FAILURE;
+        }
+    }
+
+    if (*count >= SIZE_MAX / sizeof(*expanded)) {
+        free(name);
+        sql_error_set(err, SQL_ERR_MEMORY, position, "Identifier list is too large to allocate safely");
+        return SQL_FAILURE;
+    }
+
+    new_count = *count + 1;
+    new_size = new_count * sizeof(*expanded);
+    expanded = (char **) realloc(*names, new_size);
+    if (expanded == NULL) {
+        free(name);
+        sql_error_set(err, SQL_ERR_MEMORY, position, "Out of memory while growing identifier list");
+        return SQL_FAILURE;
+    }
+
+    expanded[*count] = name;
+    *names = expanded;
+    *count = new_count;
+    return SQL_SUCCESS;
+}
+
+static int append_statement(SqlScript *script, Statement *stmt, SqlError *err, size_t position) {
+    Statement *expanded;
+    size_t new_count;
+    size_t new_size;
+
+    if (script->statement_count >= SIZE_MAX / sizeof(*expanded)) {
+        sql_error_set(err, SQL_ERR_MEMORY, position, "SQL script is too large to allocate safely");
+        return SQL_FAILURE;
+    }
+
+    new_count = script->statement_count + 1;
+    new_size = new_count * sizeof(*expanded);
+    expanded = (Statement *) realloc(script->statements, new_size);
+    if (expanded == NULL) {
+        sql_error_set(err, SQL_ERR_MEMORY, position, "Out of memory while growing statement list");
+        return SQL_FAILURE;
+    }
+
+    expanded[script->statement_count] = *stmt;
+    script->statements = expanded;
+    script->statement_count = new_count;
+    statement_init(stmt);
     return SQL_SUCCESS;
 }
 
@@ -207,11 +326,11 @@ static int parse_integer_value(Parser *parser, SqlValue *value, SqlError *err) {
     return SQL_SUCCESS;
 }
 
-/* MVP에서는 escape 없이 작은따옴표로 감싼 문자열만 허용한다. */
+/* SQL 표준처럼 ''를 문자열 내부 작은따옴표 escape로 허용한다. */
 static int parse_string_value(Parser *parser, SqlValue *value, SqlError *err) {
-    size_t start;
-    size_t length;
     char *buffer;
+    size_t length;
+    size_t capacity;
 
     if (current_char(parser) != '\'') {
         sql_error_set(err, SQL_ERR_LEX, parser->pos, "Expected string literal");
@@ -219,28 +338,60 @@ static int parse_string_value(Parser *parser, SqlValue *value, SqlError *err) {
     }
 
     parser->pos++;
-    start = parser->pos;
+    buffer = NULL;
+    length = 0;
+    capacity = 0;
 
-    while (parser->pos < parser->length && parser->input[parser->pos] != '\'') {
+    while (parser->pos < parser->length) {
+        char ch;
+
+        ch = parser->input[parser->pos];
+        if (ch == '\'') {
+            if (peek_char(parser, 1) == '\'') {
+                if (append_char_to_buffer(&buffer,
+                                          &length,
+                                          &capacity,
+                                          '\'',
+                                          err,
+                                          parser->pos,
+                                          "string") != SQL_SUCCESS) {
+                    free(buffer);
+                    return SQL_FAILURE;
+                }
+                parser->pos += 2;
+                continue;
+            }
+
+            parser->pos++;
+            if (buffer == NULL) {
+                buffer = copy_substring("", 0);
+                if (buffer == NULL) {
+                    sql_error_set(err, SQL_ERR_MEMORY, parser->pos, "Out of memory while reading string");
+                    return SQL_FAILURE;
+                }
+            }
+            value->type = SQL_VALUE_STRING;
+            value->as.string_value = buffer;
+            return SQL_SUCCESS;
+        }
+
+        if (append_char_to_buffer(&buffer,
+                                  &length,
+                                  &capacity,
+                                  ch,
+                                  err,
+                                  parser->pos,
+                                  "string") != SQL_SUCCESS) {
+            free(buffer);
+            return SQL_FAILURE;
+        }
+
         parser->pos++;
     }
 
-    if (parser->pos >= parser->length) {
-        sql_error_set(err, SQL_ERR_LEX, start, "Unterminated string literal");
-        return SQL_FAILURE;
-    }
-
-    length = parser->pos - start;
-    buffer = copy_substring(parser->input + start, length);
-    if (buffer == NULL) {
-        sql_error_set(err, SQL_ERR_MEMORY, parser->pos, "Out of memory while reading string");
-        return SQL_FAILURE;
-    }
-
-    parser->pos++;
-    value->type = SQL_VALUE_STRING;
-    value->as.string_value = buffer;
-    return SQL_SUCCESS;
+    free(buffer);
+    sql_error_set(err, SQL_ERR_LEX, parser->pos, "Unterminated string literal");
+    return SQL_FAILURE;
 }
 
 static void free_value(SqlValue *value) {
@@ -296,6 +447,82 @@ static int parse_value(Parser *parser, SqlValue *out, SqlError *err) {
     return SQL_FAILURE;
 }
 
+static int parse_parenthesized_identifier_list(Parser *parser,
+                                               char ***names,
+                                               size_t *count,
+                                               SqlError *err) {
+    if (consume_char(parser, '(', err) != SQL_SUCCESS) {
+        return SQL_FAILURE;
+    }
+
+    skip_whitespace(parser);
+    if (current_char(parser) == ')') {
+        sql_error_set(err, SQL_ERR_PARSE, parser->pos, "Column list must contain at least one identifier");
+        return SQL_FAILURE;
+    }
+
+    while (1) {
+        char *name;
+
+        name = NULL;
+        if (parse_identifier(parser, &name, err) != SQL_SUCCESS) {
+            return SQL_FAILURE;
+        }
+
+        if (append_name(names, count, name, err, parser->pos) != SQL_SUCCESS) {
+            return SQL_FAILURE;
+        }
+
+        skip_whitespace(parser);
+        if (current_char(parser) == ')') {
+            parser->pos++;
+            return SQL_SUCCESS;
+        }
+
+        if (current_char(parser) != ',') {
+            sql_error_set(err, SQL_ERR_PARSE, parser->pos, "Expected ',' or ')' in column list");
+            return SQL_FAILURE;
+        }
+
+        parser->pos++;
+        skip_whitespace(parser);
+        if (current_char(parser) == ')') {
+            sql_error_set(err, SQL_ERR_PARSE, parser->pos, "Trailing comma is not allowed in column list");
+            return SQL_FAILURE;
+        }
+    }
+}
+
+static int parse_identifier_sequence(Parser *parser,
+                                     char ***names,
+                                     size_t *count,
+                                     SqlError *err) {
+    while (1) {
+        char *name;
+
+        name = NULL;
+        if (parse_identifier(parser, &name, err) != SQL_SUCCESS) {
+            return SQL_FAILURE;
+        }
+
+        if (append_name(names, count, name, err, parser->pos) != SQL_SUCCESS) {
+            return SQL_FAILURE;
+        }
+
+        skip_whitespace(parser);
+        if (current_char(parser) != ',') {
+            return SQL_SUCCESS;
+        }
+
+        parser->pos++;
+        skip_whitespace(parser);
+        if (current_char(parser) == '\0' || current_char(parser) == ';') {
+            sql_error_set(err, SQL_ERR_PARSE, parser->pos, "Trailing comma is not allowed in identifier list");
+            return SQL_FAILURE;
+        }
+    }
+}
+
 /* VALUES (...) 내부를 순서대로 읽어 가변 길이 배열로 축적한다. */
 static int parse_values_list(Parser *parser, Statement *stmt, SqlError *err) {
     if (consume_char(parser, '(', err) != SQL_SUCCESS) {
@@ -348,7 +575,7 @@ static int parse_values_list(Parser *parser, Statement *stmt, SqlError *err) {
     }
 }
 
-/* INSERT 문의 나머지 문법을 읽고 Statement를 채운다. */
+/* INSERT 문에서 optional column list와 VALUES 절을 읽는다. */
 static int parse_insert(Parser *parser, Statement *stmt, SqlError *err) {
     stmt->type = STMT_INSERT;
 
@@ -360,24 +587,55 @@ static int parse_insert(Parser *parser, Statement *stmt, SqlError *err) {
         return SQL_FAILURE;
     }
 
+    skip_whitespace(parser);
+    if (current_char(parser) == '(') {
+        if (parse_parenthesized_identifier_list(parser,
+                                                &stmt->columns,
+                                                &stmt->column_count,
+                                                err) != SQL_SUCCESS) {
+            return SQL_FAILURE;
+        }
+    }
+
     if (expect_keyword(parser, "VALUES", err) != SQL_SUCCESS) {
         sql_error_set(err, SQL_ERR_PARSE, parser->pos, "Expected VALUES after INSERT target");
         return SQL_FAILURE;
     }
 
-    return parse_values_list(parser, stmt, err);
+    if (parse_values_list(parser, stmt, err) != SQL_SUCCESS) {
+        return SQL_FAILURE;
+    }
+
+    if (stmt->column_count > 0 && stmt->column_count != stmt->value_count) {
+        sql_error_set(err,
+                      SQL_ERR_PARSE,
+                      parser->pos,
+                      "Column count and VALUES count must match");
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
 }
 
-/* SELECT는 Phase 1에서 SELECT * FROM ... 형태만 허용한다. */
+static int parse_select_columns(Parser *parser, Statement *stmt, SqlError *err) {
+    skip_whitespace(parser);
+    if (current_char(parser) == '*') {
+        stmt->select_all = 1;
+        parser->pos++;
+        return SQL_SUCCESS;
+    }
+
+    stmt->select_all = 0;
+    return parse_identifier_sequence(parser, &stmt->columns, &stmt->column_count, err);
+}
+
+/* SELECT는 * 또는 명시적 컬럼 목록을 읽고 FROM 대상을 파싱한다. */
 static int parse_select(Parser *parser, Statement *stmt, SqlError *err) {
     stmt->type = STMT_SELECT;
 
-    skip_whitespace(parser);
-    if (current_char(parser) != '*') {
-        sql_error_set(err, SQL_ERR_UNSUPPORTED, parser->pos, "Only SELECT * is supported");
+    if (parse_select_columns(parser, stmt, err) != SQL_SUCCESS) {
         return SQL_FAILURE;
     }
-    parser->pos++;
 
     if (expect_keyword(parser, "FROM", err) != SQL_SUCCESS) {
         return SQL_FAILURE;
@@ -386,11 +644,87 @@ static int parse_select(Parser *parser, Statement *stmt, SqlError *err) {
     return parse_qualified_name(parser, stmt, err);
 }
 
-/* Phase 1 파서의 진입점이다. 성공 시에만 완성된 AST를 호출자에게 넘긴다. */
-int parse_sql(const char *sql, Statement *out, SqlError *err) {
+static int parse_statement_core(Parser *parser, Statement *stmt, SqlError *err) {
+    skip_whitespace(parser);
+    if (match_keyword(parser, "INSERT")) {
+        return parse_insert(parser, stmt, err);
+    }
+
+    if (match_keyword(parser, "SELECT")) {
+        return parse_select(parser, stmt, err);
+    }
+
+    sql_error_set(err,
+                  SQL_ERR_UNSUPPORTED,
+                  parser->pos,
+                  "Only INSERT and SELECT statements are supported");
+    return SQL_FAILURE;
+}
+
+/* 여러 SQL 문장을 순서대로 파싱해 script AST에 담는다. */
+int parse_sql_script(const char *sql, SqlScript *out, SqlError *err) {
     Parser parser;
+    SqlScript script;
     Statement stmt;
-    size_t first_non_space;
+
+    if (err == NULL) {
+        return SQL_FAILURE;
+    }
+
+    sql_error_clear(err);
+    if (sql == NULL || out == NULL) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "SQL input and output script are required");
+        return SQL_FAILURE;
+    }
+
+    parser.input = sql;
+    parser.length = strlen(sql);
+    parser.pos = 0;
+    skip_utf8_bom(&parser);
+
+    sql_script_init(&script);
+
+    while (1) {
+        skip_whitespace(&parser);
+        if (parser.pos >= parser.length) {
+            break;
+        }
+
+        statement_init(&stmt);
+        if (parse_statement_core(&parser, &stmt, err) != SQL_SUCCESS) {
+            statement_free(&stmt);
+            sql_script_free(&script);
+            return SQL_FAILURE;
+        }
+
+        skip_whitespace(&parser);
+        if (current_char(&parser) != ';') {
+            statement_free(&stmt);
+            sql_script_free(&script);
+            sql_error_set(err, SQL_ERR_PARSE, parser.pos, "Expected ';' at end of statement");
+            return SQL_FAILURE;
+        }
+        parser.pos++;
+
+        if (append_statement(&script, &stmt, err, parser.pos) != SQL_SUCCESS) {
+            statement_free(&stmt);
+            sql_script_free(&script);
+            return SQL_FAILURE;
+        }
+    }
+
+    if (script.statement_count == 0) {
+        sql_error_set(err, SQL_ERR_PARSE, parser.pos, "SQL input is empty");
+        return SQL_FAILURE;
+    }
+
+    *out = script;
+    return SQL_SUCCESS;
+}
+
+/* 단일 Statement API는 호환을 위해 유지하되, 여러 문장은 실패시킨다. */
+int parse_sql(const char *sql, Statement *out, SqlError *err) {
+    SqlScript script;
 
     if (err == NULL) {
         return SQL_FAILURE;
@@ -402,61 +736,18 @@ int parse_sql(const char *sql, Statement *out, SqlError *err) {
         return SQL_FAILURE;
     }
 
-    statement_init(&stmt);
-
-    parser.input = sql;
-    parser.length = strlen(sql);
-    parser.pos = 0;
-
-    first_non_space = 0;
-    while (first_non_space < parser.length &&
-           isspace((unsigned char) sql[first_non_space])) {
-        first_non_space++;
-    }
-
-    if (first_non_space == parser.length) {
-        sql_error_set(err, SQL_ERR_PARSE, 0, "SQL input is empty");
+    sql_script_init(&script);
+    if (parse_sql_script(sql, &script, err) != SQL_SUCCESS) {
         return SQL_FAILURE;
     }
 
-    skip_whitespace(&parser);
-    if (match_keyword(&parser, "INSERT")) {
-        if (parse_insert(&parser, &stmt, err) != SQL_SUCCESS) {
-            statement_free(&stmt);
-            return SQL_FAILURE;
-        }
-    } else if (match_keyword(&parser, "SELECT")) {
-        if (parse_select(&parser, &stmt, err) != SQL_SUCCESS) {
-            statement_free(&stmt);
-            return SQL_FAILURE;
-        }
-    } else {
-        sql_error_set(err,
-                      SQL_ERR_UNSUPPORTED,
-                      parser.pos,
-                      "Only INSERT and SELECT statements are supported");
+    if (script.statement_count != 1) {
+        sql_script_free(&script);
+        sql_error_set(err, SQL_ERR_UNSUPPORTED, 0, "Only one SQL statement per file is allowed in parse_sql");
         return SQL_FAILURE;
     }
 
-    /* 세미콜론 뒤에 남는 문자가 있으면 다중 문장으로 간주해 실패시킨다. */
-    skip_whitespace(&parser);
-    if (current_char(&parser) != ';') {
-        statement_free(&stmt);
-        sql_error_set(err, SQL_ERR_PARSE, parser.pos, "Expected ';' at end of statement");
-        return SQL_FAILURE;
-    }
-    parser.pos++;
-
-    skip_whitespace(&parser);
-    if (parser.pos != parser.length) {
-        statement_free(&stmt);
-        sql_error_set(err,
-                      SQL_ERR_UNSUPPORTED,
-                      parser.pos,
-                      "Only one SQL statement per file is allowed");
-        return SQL_FAILURE;
-    }
-
-    *out = stmt;
+    *out = script.statements[0];
+    free(script.statements);
     return SQL_SUCCESS;
 }

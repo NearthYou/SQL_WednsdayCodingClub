@@ -7,7 +7,9 @@
 #include "sql_error.h"
 #include "sql_types.h"
 
-/* Phase 2에서 AST를 실제 동작으로 연결하는 실행기 진입점이다. */
+/* 단일 Statement 호환 실행기다. */
 int execute_statement(const Statement *stmt, const char *data_dir, FILE *out, SqlError *err);
+/* 여러 문장을 staging/rollback 규칙으로 실행하는 Phase 3 진입점이다. */
+int execute_script(const SqlScript *script, const char *data_dir, FILE *out, SqlError *err);
 
 #endif

@@ -23,6 +23,11 @@ void statement_free(Statement *stmt) {
     free(stmt->schema);
     free(stmt->table);
 
+    for (i = 0; i < stmt->column_count; ++i) {
+        free(stmt->columns[i]);
+    }
+    free(stmt->columns);
+
     for (i = 0; i < stmt->value_count; ++i) {
         if (stmt->values[i].type == SQL_VALUE_STRING) {
             free(stmt->values[i].as.string_value);
@@ -31,6 +36,29 @@ void statement_free(Statement *stmt) {
 
     free(stmt->values);
     statement_init(stmt);
+}
+
+void sql_script_init(SqlScript *script) {
+    if (script == NULL) {
+        return;
+    }
+
+    memset(script, 0, sizeof(*script));
+}
+
+void sql_script_free(SqlScript *script) {
+    size_t i;
+
+    if (script == NULL) {
+        return;
+    }
+
+    for (i = 0; i < script->statement_count; ++i) {
+        statement_free(&script->statements[i]);
+    }
+
+    free(script->statements);
+    sql_script_init(script);
 }
 
 const char *statement_type_name(StatementType type) {
