@@ -1152,13 +1152,31 @@ static int copy_stream_validated(FILE *input,
     return SQL_SUCCESS;
 }
 
-static int write_projection_row(FILE *out,
-                                const TableSchema *schema,
-                                const CsvRow *row,
-                                const size_t *selected_indices,
-                                size_t selected_count,
-                                SqlError *err,
-                                const char *csv_path) {
+static int validate_row_shape(const CsvRow *row,
+                              const CsvRow *header_row,
+                              const char *csv_path,
+                              SqlError *err) {
+    if (row->count != header_row->count) {
+        sql_error_set(err,
+                      SQL_ERR_PARSE,
+                      0,
+                      "CSV row in '%s' has %u columns but header has %u",
+                      csv_path,
+                      (unsigned) row->count,
+                      (unsigned) header_row->count);
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int write_projection_row_csv(FILE *out,
+                                    const TableSchema *schema,
+                                    const CsvRow *row,
+                                    const size_t *selected_indices,
+                                    size_t selected_count,
+                                    SqlError *err,
+                                    const char *csv_path) {
     size_t i;
 
     for (i = 0; i < selected_count; ++i) {
@@ -1191,6 +1209,500 @@ static int write_projection_row(FILE *out,
     }
 
     return SQL_SUCCESS;
+}
+
+static int write_projection_header_csv(FILE *out,
+                                       const char *const *column_names,
+                                       size_t column_count,
+                                       SqlError *err,
+                                       const char *csv_path) {
+    size_t i;
+
+    for (i = 0; i < column_count; ++i) {
+        if (i > 0 && fputc(',', out) == EOF) {
+            sql_error_set(err, SQL_ERR_IO, 0, "Failed to write projected header for '%s'", csv_path);
+            return SQL_FAILURE;
+        }
+
+        if (fputs(column_names[i], out) == EOF) {
+            sql_error_set(err, SQL_ERR_IO, 0, "Failed to write projected header for '%s'", csv_path);
+            return SQL_FAILURE;
+        }
+    }
+
+    if (fputc('\n', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to finish projected header for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int allocate_identity_indices(size_t **out_selected_indices,
+                                     size_t count,
+                                     SqlError *err,
+                                     const char *csv_path) {
+    size_t *selected_indices;
+    size_t i;
+
+    selected_indices = (size_t *) malloc(count * sizeof(*selected_indices));
+    if (selected_indices == NULL) {
+        sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while preparing SELECT columns for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    for (i = 0; i < count; ++i) {
+        selected_indices[i] = i;
+    }
+
+    *out_selected_indices = selected_indices;
+    return SQL_SUCCESS;
+}
+
+static int prepare_selected_indices(const TableSchema *schema,
+                                    int has_schema,
+                                    const CsvRow *header_row,
+                                    const char *const *column_names,
+                                    size_t column_count,
+                                    int select_all,
+                                    size_t **out_selected_indices,
+                                    size_t *out_selected_count,
+                                    SqlError *err,
+                                    const char *csv_path) {
+    size_t *selected_indices;
+
+    selected_indices = NULL;
+    if (select_all) {
+        if (allocate_identity_indices(&selected_indices, header_row->count, err, csv_path) != SQL_SUCCESS) {
+            return SQL_FAILURE;
+        }
+
+        *out_selected_indices = selected_indices;
+        *out_selected_count = header_row->count;
+        return SQL_SUCCESS;
+    }
+
+    if (!has_schema) {
+        sql_error_set(err,
+                      SQL_ERR_UNSUPPORTED,
+                      0,
+                      "Column projection requires a schema file for '%s'",
+                      csv_path);
+        return SQL_FAILURE;
+    }
+
+    if (column_names == NULL || column_count == 0) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "SELECT projection requires at least one column");
+        return SQL_FAILURE;
+    }
+
+    selected_indices = (size_t *) malloc(column_count * sizeof(*selected_indices));
+    if (selected_indices == NULL) {
+        sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while preparing SELECT projection for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    {
+        size_t i;
+        size_t j;
+
+        for (i = 0; i < column_count; ++i) {
+            int schema_index;
+
+            schema_index = find_schema_index(schema, column_names[i]);
+            if (schema_index < 0) {
+                free(selected_indices);
+                sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Unknown SELECT column '%s' for '%s'", column_names[i], csv_path);
+                return SQL_FAILURE;
+            }
+
+            for (j = 0; j < i; ++j) {
+                if (selected_indices[j] == (size_t) schema_index) {
+                    free(selected_indices);
+                    sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Duplicate SELECT column '%s' for '%s'", column_names[i], csv_path);
+                    return SQL_FAILURE;
+                }
+            }
+
+            selected_indices[i] = (size_t) schema_index;
+        }
+    }
+
+    *out_selected_indices = selected_indices;
+    *out_selected_count = column_count;
+    return SQL_SUCCESS;
+}
+
+static int build_alignment_map(unsigned char **out_align_right,
+                               const TableSchema *schema,
+                               int has_schema,
+                               const size_t *selected_indices,
+                               size_t selected_count,
+                               SqlError *err,
+                               const char *csv_path) {
+    unsigned char *align_right;
+    size_t i;
+
+    align_right = (unsigned char *) calloc(selected_count, sizeof(*align_right));
+    if (align_right == NULL) {
+        sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while preparing pretty SELECT alignment for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    if (has_schema) {
+        for (i = 0; i < selected_count; ++i) {
+            if (schema->columns[selected_indices[i]].type == STORAGE_COL_INT) {
+                align_right[i] = 1;
+            }
+        }
+    }
+
+    *out_align_right = align_right;
+    return SQL_SUCCESS;
+}
+
+static int build_initial_widths(size_t **out_widths,
+                                const char *const *display_headers,
+                                size_t selected_count,
+                                SqlError *err,
+                                const char *csv_path) {
+    size_t *widths;
+    size_t i;
+
+    widths = (size_t *) malloc(selected_count * sizeof(*widths));
+    if (widths == NULL) {
+        sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while preparing pretty SELECT widths for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    for (i = 0; i < selected_count; ++i) {
+        widths[i] = strlen(display_headers[i]);
+    }
+
+    *out_widths = widths;
+    return SQL_SUCCESS;
+}
+
+static int measure_pretty_widths(FILE *file,
+                                 const CsvRow *header_row,
+                                 const size_t *selected_indices,
+                                 size_t selected_count,
+                                 size_t *widths,
+                                 SqlError *err,
+                                 const char *csv_path) {
+    while (1) {
+        char *record;
+        CsvRow row;
+        int read_result;
+        size_t i;
+
+        record = NULL;
+        csv_row_init(&row);
+        read_result = read_csv_record(file, &record, err, csv_path);
+        if (read_result < 0) {
+            return SQL_FAILURE;
+        }
+
+        if (read_result == 0) {
+            break;
+        }
+
+        if (parse_csv_record(record, &row, err, csv_path) != SQL_SUCCESS) {
+            free(record);
+            return SQL_FAILURE;
+        }
+        free(record);
+
+        if (validate_row_shape(&row, header_row, csv_path, err) != SQL_SUCCESS) {
+            csv_row_free(&row);
+            return SQL_FAILURE;
+        }
+
+        for (i = 0; i < selected_count; ++i) {
+            size_t field_width;
+
+            field_width = strlen(row.fields[selected_indices[i]]);
+            if (field_width > widths[i]) {
+                widths[i] = field_width;
+            }
+        }
+
+        csv_row_free(&row);
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int write_repeat_char(FILE *out,
+                             char ch,
+                             size_t count,
+                             SqlError *err,
+                             const char *csv_path,
+                             const char *context) {
+    size_t i;
+
+    for (i = 0; i < count; ++i) {
+        if (fputc((unsigned char) ch, out) == EOF) {
+            sql_error_set(err, SQL_ERR_IO, 0, "Failed to write %s for '%s'", context, csv_path);
+            return SQL_FAILURE;
+        }
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int write_pretty_border(FILE *out,
+                               const size_t *widths,
+                               size_t column_count,
+                               SqlError *err,
+                               const char *csv_path) {
+    size_t i;
+
+    if (fputc('+', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to write pretty SELECT border for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    for (i = 0; i < column_count; ++i) {
+        if (write_repeat_char(out, '-', widths[i] + 2, err, csv_path, "pretty SELECT border") != SQL_SUCCESS ||
+            fputc('+', out) == EOF) {
+            sql_error_set(err, SQL_ERR_IO, 0, "Failed to write pretty SELECT border for '%s'", csv_path);
+            return SQL_FAILURE;
+        }
+    }
+
+    if (fputc('\n', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to finish pretty SELECT border for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int write_pretty_cell(FILE *out,
+                             const char *text,
+                             size_t width,
+                             int align_right,
+                             SqlError *err,
+                             const char *csv_path) {
+    size_t length;
+    size_t padding;
+
+    length = strlen(text);
+    padding = (width > length) ? (width - length) : 0;
+
+    if (fputc(' ', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to start pretty SELECT cell for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    if (align_right) {
+        if (write_repeat_char(out, ' ', padding, err, csv_path, "pretty SELECT padding") != SQL_SUCCESS) {
+            return SQL_FAILURE;
+        }
+    }
+
+    if (fputs(text, out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to write pretty SELECT cell for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    if (!align_right) {
+        if (write_repeat_char(out, ' ', padding, err, csv_path, "pretty SELECT padding") != SQL_SUCCESS) {
+            return SQL_FAILURE;
+        }
+    }
+
+    if (fputc(' ', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to finish pretty SELECT cell for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int write_pretty_header_row(FILE *out,
+                                   const char *const *display_headers,
+                                   const size_t *widths,
+                                   size_t column_count,
+                                   SqlError *err,
+                                   const char *csv_path) {
+    size_t i;
+
+    if (fputc('|', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to start pretty SELECT header for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    for (i = 0; i < column_count; ++i) {
+        if (write_pretty_cell(out, display_headers[i], widths[i], 0, err, csv_path) != SQL_SUCCESS ||
+            fputc('|', out) == EOF) {
+            sql_error_set(err, SQL_ERR_IO, 0, "Failed to write pretty SELECT header for '%s'", csv_path);
+            return SQL_FAILURE;
+        }
+    }
+
+    if (fputc('\n', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to finish pretty SELECT header for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int write_pretty_data_row(FILE *out,
+                                 const CsvRow *row,
+                                 const size_t *selected_indices,
+                                 const size_t *widths,
+                                 const unsigned char *align_right,
+                                 size_t column_count,
+                                 SqlError *err,
+                                 const char *csv_path) {
+    size_t i;
+
+    if (fputc('|', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to start pretty SELECT row for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    for (i = 0; i < column_count; ++i) {
+        if (write_pretty_cell(out,
+                              row->fields[selected_indices[i]],
+                              widths[i],
+                              align_right[i] != 0,
+                              err,
+                              csv_path) != SQL_SUCCESS ||
+            fputc('|', out) == EOF) {
+            sql_error_set(err, SQL_ERR_IO, 0, "Failed to write pretty SELECT row for '%s'", csv_path);
+            return SQL_FAILURE;
+        }
+    }
+
+    if (fputc('\n', out) == EOF) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to finish pretty SELECT row for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int render_pretty_rows(FILE *file,
+                              FILE *out,
+                              const CsvRow *header_row,
+                              const size_t *selected_indices,
+                              const size_t *widths,
+                              const unsigned char *align_right,
+                              size_t column_count,
+                              SqlError *err,
+                              const char *csv_path) {
+    while (1) {
+        char *record;
+        CsvRow row;
+        int read_result;
+
+        record = NULL;
+        csv_row_init(&row);
+        read_result = read_csv_record(file, &record, err, csv_path);
+        if (read_result < 0) {
+            return SQL_FAILURE;
+        }
+
+        if (read_result == 0) {
+            break;
+        }
+
+        if (parse_csv_record(record, &row, err, csv_path) != SQL_SUCCESS) {
+            free(record);
+            return SQL_FAILURE;
+        }
+        free(record);
+
+        if (validate_row_shape(&row, header_row, csv_path, err) != SQL_SUCCESS ||
+            write_pretty_data_row(out, &row, selected_indices, widths, align_right, column_count, err, csv_path) != SQL_SUCCESS) {
+            csv_row_free(&row);
+            return SQL_FAILURE;
+        }
+
+        csv_row_free(&row);
+    }
+
+    return SQL_SUCCESS;
+}
+
+static int write_pretty_table(FILE *file,
+                              FILE *out,
+                              long data_start,
+                              const CsvRow *header_row,
+                              const TableSchema *schema,
+                              int has_schema,
+                              const size_t *selected_indices,
+                              const char *const *display_headers,
+                              size_t selected_count,
+                              SqlError *err,
+                              const char *csv_path) {
+    size_t *widths;
+    unsigned char *align_right;
+    int result;
+
+    widths = NULL;
+    align_right = NULL;
+
+    if (build_initial_widths(&widths, display_headers, selected_count, err, csv_path) != SQL_SUCCESS ||
+        build_alignment_map(&align_right, schema, has_schema, selected_indices, selected_count, err, csv_path) != SQL_SUCCESS) {
+        free(widths);
+        free(align_right);
+        return SQL_FAILURE;
+    }
+
+    result = measure_pretty_widths(file,
+                                   header_row,
+                                   selected_indices,
+                                   selected_count,
+                                   widths,
+                                   err,
+                                   csv_path);
+    if (result != SQL_SUCCESS) {
+        free(widths);
+        free(align_right);
+        return SQL_FAILURE;
+    }
+
+    if (fseek(file, data_start, SEEK_SET) != 0) {
+        free(widths);
+        free(align_right);
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to rewind CSV file '%s' for pretty SELECT", csv_path);
+        return SQL_FAILURE;
+    }
+
+    result = write_pretty_border(out, widths, selected_count, err, csv_path);
+    if (result == SQL_SUCCESS) {
+        result = write_pretty_header_row(out, display_headers, widths, selected_count, err, csv_path);
+    }
+    if (result == SQL_SUCCESS) {
+        result = write_pretty_border(out, widths, selected_count, err, csv_path);
+    }
+    if (result == SQL_SUCCESS) {
+        result = render_pretty_rows(file,
+                                    out,
+                                    header_row,
+                                    selected_indices,
+                                    widths,
+                                    align_right,
+                                    selected_count,
+                                    err,
+                                    csv_path);
+    }
+    if (result == SQL_SUCCESS) {
+        result = write_pretty_border(out, widths, selected_count, err, csv_path);
+    }
+    if (result == SQL_SUCCESS && fflush(out) != 0) {
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to flush SELECT output for '%s'", csv_path);
+        result = SQL_FAILURE;
+    }
+
+    free(widths);
+    free(align_right);
+    return result;
 }
 
 int storage_append_row(const char *data_dir,
@@ -1388,13 +1900,36 @@ int storage_select_projection(const char *data_dir,
                               int select_all,
                               FILE *out,
                               SqlError *err) {
+    return storage_select_projection_mode(data_dir,
+                                          schema_name,
+                                          table,
+                                          column_names,
+                                          column_count,
+                                          select_all,
+                                          EXECUTE_OUTPUT_RAW,
+                                          out,
+                                          err);
+}
+
+int storage_select_projection_mode(const char *data_dir,
+                                   const char *schema_name,
+                                   const char *table,
+                                   const char *const *column_names,
+                                   size_t column_count,
+                                   int select_all,
+                                   ExecuteOutputMode output_mode,
+                                   FILE *out,
+                                   SqlError *err) {
     char *csv_path;
     TableSchema schema;
     int has_schema;
     CsvRow header_row;
     FILE *file;
     int result;
+    long data_start;
     size_t *selected_indices;
+    size_t selected_count;
+    const char *const *display_headers;
 
     if (err == NULL) {
         return SQL_FAILURE;
@@ -1406,10 +1941,18 @@ int storage_select_projection(const char *data_dir,
         return SQL_FAILURE;
     }
 
+    if (output_mode != EXECUTE_OUTPUT_RAW && output_mode != EXECUTE_OUTPUT_PRETTY_ASCII) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Unsupported execute output mode");
+        return SQL_FAILURE;
+    }
+
     csv_path = NULL;
     file = NULL;
     selected_indices = NULL;
+    selected_count = 0;
+    display_headers = NULL;
     has_schema = 0;
+    data_start = 0L;
     csv_row_init(&header_row);
     table_schema_init(&schema);
 
@@ -1436,7 +1979,7 @@ int storage_select_projection(const char *data_dir,
         return SQL_FAILURE;
     }
 
-    if (select_all) {
+    if (output_mode == EXECUTE_OUTPUT_RAW && select_all) {
         if (fseek(file, 0L, SEEK_SET) != 0) {
             csv_row_free(&header_row);
             fclose(file);
@@ -1454,106 +1997,62 @@ int storage_select_projection(const char *data_dir,
         return result;
     }
 
-    if (!has_schema) {
+    if (prepare_selected_indices(&schema,
+                                 has_schema,
+                                 &header_row,
+                                 column_names,
+                                 column_count,
+                                 select_all,
+                                 &selected_indices,
+                                 &selected_count,
+                                 err,
+                                 csv_path) != SQL_SUCCESS) {
         csv_row_free(&header_row);
         fclose(file);
         table_schema_free(&schema);
-        sql_error_set(err,
-                      SQL_ERR_UNSUPPORTED,
-                      0,
-                      "Column projection requires a schema file for '%s'",
-                      csv_path);
         free(csv_path);
         return SQL_FAILURE;
     }
 
-    if (column_names == NULL || column_count == 0) {
+    display_headers = select_all ? (const char *const *) header_row.fields : column_names;
+    data_start = ftell(file);
+    if (data_start < 0) {
+        free(selected_indices);
         csv_row_free(&header_row);
         fclose(file);
         table_schema_free(&schema);
-        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "SELECT projection requires at least one column");
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to capture CSV read position for '%s'", csv_path);
         free(csv_path);
         return SQL_FAILURE;
     }
 
-    selected_indices = (size_t *) malloc(column_count * sizeof(*selected_indices));
-    if (selected_indices == NULL) {
+    if (output_mode == EXECUTE_OUTPUT_PRETTY_ASCII) {
+        result = write_pretty_table(file,
+                                    out,
+                                    data_start,
+                                    &header_row,
+                                    &schema,
+                                    has_schema,
+                                    selected_indices,
+                                    display_headers,
+                                    selected_count,
+                                    err,
+                                    csv_path);
+        free(selected_indices);
         csv_row_free(&header_row);
         fclose(file);
         table_schema_free(&schema);
-        sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while preparing SELECT projection for '%s'", csv_path);
+        free(csv_path);
+        return result;
+    }
+
+    if (!select_all && write_projection_header_csv(out, column_names, column_count, err, csv_path) != SQL_SUCCESS) {
+        free(selected_indices);
+        csv_row_free(&header_row);
+        fclose(file);
+        table_schema_free(&schema);
         free(csv_path);
         return SQL_FAILURE;
-    }
-
-    {
-        size_t i;
-        size_t j;
-
-        for (i = 0; i < column_count; ++i) {
-            int schema_index;
-
-            schema_index = find_schema_index(&schema, column_names[i]);
-            if (schema_index < 0) {
-                free(selected_indices);
-                csv_row_free(&header_row);
-                fclose(file);
-                table_schema_free(&schema);
-                sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Unknown SELECT column '%s' for '%s'", column_names[i], csv_path);
-                free(csv_path);
-                return SQL_FAILURE;
-            }
-
-            for (j = 0; j < i; ++j) {
-                if (selected_indices[j] == (size_t) schema_index) {
-                    free(selected_indices);
-                    csv_row_free(&header_row);
-                    fclose(file);
-                    table_schema_free(&schema);
-                    sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Duplicate SELECT column '%s' for '%s'", column_names[i], csv_path);
-                    free(csv_path);
-                    return SQL_FAILURE;
-                }
-            }
-
-            selected_indices[i] = (size_t) schema_index;
-        }
-    }
-
-    {
-        size_t i;
-
-        for (i = 0; i < column_count; ++i) {
-            if (i > 0 && fputc(',', out) == EOF) {
-                free(selected_indices);
-                csv_row_free(&header_row);
-                fclose(file);
-                table_schema_free(&schema);
-                sql_error_set(err, SQL_ERR_IO, 0, "Failed to write projected header for '%s'", csv_path);
-                free(csv_path);
-                return SQL_FAILURE;
-            }
-
-            if (fputs(column_names[i], out) == EOF) {
-                free(selected_indices);
-                csv_row_free(&header_row);
-                fclose(file);
-                table_schema_free(&schema);
-                sql_error_set(err, SQL_ERR_IO, 0, "Failed to write projected header for '%s'", csv_path);
-                free(csv_path);
-                return SQL_FAILURE;
-            }
-        }
-
-        if (fputc('\n', out) == EOF) {
-            free(selected_indices);
-            csv_row_free(&header_row);
-            fclose(file);
-            table_schema_free(&schema);
-            sql_error_set(err, SQL_ERR_IO, 0, "Failed to finish projected header for '%s'", csv_path);
-            free(csv_path);
-            return SQL_FAILURE;
-        }
     }
 
     while (1) {
@@ -1588,24 +2087,8 @@ int storage_select_projection(const char *data_dir,
         }
         free(record);
 
-        if (row.count != header_row.count) {
-            csv_row_free(&row);
-            free(selected_indices);
-            csv_row_free(&header_row);
-            fclose(file);
-            table_schema_free(&schema);
-            sql_error_set(err,
-                          SQL_ERR_PARSE,
-                          0,
-                          "CSV row in '%s' has %u columns but header has %u",
-                          csv_path,
-                          (unsigned) row.count,
-                          (unsigned) header_row.count);
-            free(csv_path);
-            return SQL_FAILURE;
-        }
-
-        if (write_projection_row(out, &schema, &row, selected_indices, column_count, err, csv_path) != SQL_SUCCESS) {
+        if (validate_row_shape(&row, &header_row, csv_path, err) != SQL_SUCCESS ||
+            write_projection_row_csv(out, &schema, &row, selected_indices, selected_count, err, csv_path) != SQL_SUCCESS) {
             csv_row_free(&row);
             free(selected_indices);
             csv_row_free(&header_row);

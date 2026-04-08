@@ -164,7 +164,11 @@ static int parse_script(const char *sql, SqlScript *script, SqlError *err) {
     return parse_sql_script(sql, script, err);
 }
 
-static int execute_sql_script_to_file(const char *sql, const char *data_dir, const char *output_path, SqlError *err) {
+static int execute_sql_script_formatted_to_file(const char *sql,
+                                                const char *data_dir,
+                                                ExecuteOutputMode output_mode,
+                                                const char *output_path,
+                                                SqlError *err) {
     SqlScript script;
     FILE *output;
     int result;
@@ -182,13 +186,21 @@ static int execute_sql_script_to_file(const char *sql, const char *data_dir, con
         return SQL_FAILURE;
     }
 
-    result = execute_script(&script, data_dir, output, err);
+    result = execute_script_formatted(&script, data_dir, output_mode, output, err);
     fclose(output);
     sql_script_free(&script);
     return result;
 }
 
-static int execute_sql_script_to_stream(const char *sql, const char *data_dir, FILE *output, SqlError *err) {
+static int execute_sql_script_to_file(const char *sql, const char *data_dir, const char *output_path, SqlError *err) {
+    return execute_sql_script_formatted_to_file(sql, data_dir, EXECUTE_OUTPUT_RAW, output_path, err);
+}
+
+static int execute_sql_script_formatted_to_stream(const char *sql,
+                                                  const char *data_dir,
+                                                  ExecuteOutputMode output_mode,
+                                                  FILE *output,
+                                                  SqlError *err) {
     SqlScript script;
     int result;
 
@@ -198,9 +210,13 @@ static int execute_sql_script_to_stream(const char *sql, const char *data_dir, F
         return result;
     }
 
-    result = execute_script(&script, data_dir, output, err);
+    result = execute_script_formatted(&script, data_dir, output_mode, output, err);
     sql_script_free(&script);
     return result;
+}
+
+static int execute_sql_script_to_stream(const char *sql, const char *data_dir, FILE *output, SqlError *err) {
+    return execute_sql_script_formatted_to_stream(sql, data_dir, EXECUTE_OUTPUT_RAW, output, err);
 }
 
 static void build_table_file_name(char *buffer,
@@ -646,6 +662,258 @@ static int test_execute_script_insert_then_select_sees_staged_row(void) {
     return 0;
 }
 
+static int test_execute_select_all_pretty_ascii(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_formatted_to_file("SELECT * FROM users;",
+                                               dir,
+                                               EXECUTE_OUTPUT_PRETTY_ASCII,
+                                               output_path,
+                                               &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents,
+                 "+----+-------+-----+\n"
+                 "| id | name  | age |\n"
+                 "+----+-------+-----+\n"
+                 "|  1 | alice |  20 |\n"
+                 "|  2 | bob   |  30 |\n"
+                 "+----+-------+-----+\n") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_projection_pretty_ascii(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_formatted_to_file("SELECT name, age FROM users;",
+                                               dir,
+                                               EXECUTE_OUTPUT_PRETTY_ASCII,
+                                               output_path,
+                                               &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents,
+                 "+-------+-----+\n"
+                 "| name  | age |\n"
+                 "+-------+-----+\n"
+                 "| alice |  20 |\n"
+                 "| bob   |  30 |\n"
+                 "+-------+-----+\n") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_pretty_empty_result(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_formatted_to_file("SELECT * FROM users;",
+                                               dir,
+                                               EXECUTE_OUTPUT_PRETTY_ASCII,
+                                               output_path,
+                                               &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents,
+                 "+----+------+-----+\n"
+                 "| id | name | age |\n"
+                 "+----+------+-----+\n"
+                 "+----+------+-----+\n") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_script_insert_then_select_pretty_ascii(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    char *csv_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_formatted_to_file("INSERT INTO users (id, name, age) VALUES (2, 'bob', 30); SELECT name, age FROM users;",
+                                               dir,
+                                               EXECUTE_OUTPUT_PRETTY_ASCII,
+                                               output_path,
+                                               &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    csv_contents = read_text_file(csv_path);
+    CHECK(output_contents != NULL);
+    CHECK(csv_contents != NULL);
+    CHECK(strcmp(output_contents,
+                 "INSERT 1 INTO users\n"
+                 "+-------+-----+\n"
+                 "| name  | age |\n"
+                 "+-------+-----+\n"
+                 "| alice |  20 |\n"
+                 "| bob   |  30 |\n"
+                 "+-------+-----+\n") == 0);
+    CHECK(strcmp(csv_contents, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+
+    free(output_contents);
+    free(csv_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_pretty_strings_render_human_values(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path,
+                          "id,name,age\n"
+                          "1,\"space name\",20\n"
+                          "2,\"comma,2\",30\n"
+                          "3,\"\"\"quote\"\"\",40\n"
+                          "4,\"o'malley\",50\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_formatted_to_file("SELECT name, age FROM users;",
+                                               dir,
+                                               EXECUTE_OUTPUT_PRETTY_ASCII,
+                                               output_path,
+                                               &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents,
+                 "+------------+-----+\n"
+                 "| name       | age |\n"
+                 "+------------+-----+\n"
+                 "| space name |  20 |\n"
+                 "| comma,2    |  30 |\n"
+                 "| \"quote\"    |  40 |\n"
+                 "| o'malley   |  50 |\n"
+                 "+------------+-----+\n") == 0);
+    CHECK(strstr(output_contents, "\"\"quote\"\"") == NULL);
+    CHECK(strstr(output_contents, "\"comma,2\"") == NULL);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_pretty_output_failure_rolls_back_committed_data(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *csv_contents;
+    char *output_contents;
+    FILE *output;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+    CHECK(write_text_file(output_path, "seed") == 0);
+
+    output = fopen(output_path, "rb");
+    CHECK(output != NULL);
+    CHECK(execute_sql_script_formatted_to_stream("INSERT INTO users (id, name, age) VALUES (2, 'bob', 30); SELECT name, age FROM users;",
+                                                 dir,
+                                                 EXECUTE_OUTPUT_PRETTY_ASCII,
+                                                 output,
+                                                 &err) == SQL_FAILURE);
+    fclose(output);
+    CHECK(err.code == SQL_ERR_IO);
+
+    csv_contents = read_text_file(csv_path);
+    output_contents = read_text_file(output_path);
+    CHECK(csv_contents != NULL);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(csv_contents, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(strcmp(output_contents, "seed") == 0);
+
+    free(csv_contents);
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
 static int test_execute_script_rollback_on_failure(void) {
     char dir[128];
     char csv_path[256];
@@ -1059,9 +1327,15 @@ int main(void) {
         { "execute_type_validation_failure", test_execute_type_validation_failure },
         { "execute_select_projection", test_execute_select_projection },
         { "execute_script_insert_then_select_sees_staged_row", test_execute_script_insert_then_select_sees_staged_row },
+        { "execute_select_all_pretty_ascii", test_execute_select_all_pretty_ascii },
+        { "execute_select_projection_pretty_ascii", test_execute_select_projection_pretty_ascii },
+        { "execute_select_pretty_empty_result", test_execute_select_pretty_empty_result },
+        { "execute_script_insert_then_select_pretty_ascii", test_execute_script_insert_then_select_pretty_ascii },
+        { "execute_select_pretty_strings_render_human_values", test_execute_select_pretty_strings_render_human_values },
         { "execute_script_rollback_on_failure", test_execute_script_rollback_on_failure },
         { "execute_select_all_rejects_invalid_row_shape", test_execute_select_all_rejects_invalid_row_shape },
         { "execute_output_failure_rolls_back_committed_data", test_execute_output_failure_rolls_back_committed_data },
+        { "execute_pretty_output_failure_rolls_back_committed_data", test_execute_pretty_output_failure_rolls_back_committed_data },
         { "execute_script_rollback_on_failure_50_cases", test_execute_script_rollback_on_failure_50_cases },
         { "execute_select_all_rejects_50_invalid_rows", test_execute_select_all_rejects_50_invalid_rows },
         { "execute_script_output_failure_rolls_back_50_cases", test_execute_script_output_failure_rolls_back_50_cases },

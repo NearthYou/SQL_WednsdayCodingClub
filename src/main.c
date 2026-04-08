@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    if (execute_script(&script, data_dir, stdout, &err) != SQL_SUCCESS) {
+    if (execute_script_formatted(&script, data_dir, EXECUTE_OUTPUT_PRETTY_ASCII, stdout, &err) != SQL_SUCCESS) {
         fprintf(stderr, "Execution error [%s]: %s\n",
                 sql_error_code_name(err.code),
                 err.message);

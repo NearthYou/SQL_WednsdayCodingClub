@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "execute.h"
 #include "sql_common.h"
 #include "sql_error.h"
 #include "sql_types.h"
@@ -27,6 +28,15 @@ int storage_select_projection(const char *data_dir,
                               int select_all,
                               FILE *out,
                               SqlError *err);
+int storage_select_projection_mode(const char *data_dir,
+                                   const char *schema,
+                                   const char *table,
+                                   const char *const *column_names,
+                                   size_t column_count,
+                                   int select_all,
+                                   ExecuteOutputMode output_mode,
+                                   FILE *out,
+                                   SqlError *err);
 
 /* 기존 SELECT * 호출 경로를 위한 호환 wrapper다. */
 int storage_select_all(const char *data_dir,
