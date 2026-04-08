@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* NULL 안전하게 0으로 초기화해 호출자가 언제든 free 경로를 재사용할 수 있게 한다. */
 void statement_init(Statement *stmt) {
     if (stmt == NULL) {
         return;
@@ -11,6 +12,7 @@ void statement_init(Statement *stmt) {
     memset(stmt, 0, sizeof(*stmt));
 }
 
+/* Statement가 소유한 모든 힙 메모리를 한 곳에서 해제한다. */
 void statement_free(Statement *stmt) {
     size_t i;
 

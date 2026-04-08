@@ -1,396 +1,294 @@
-# Phase 1 Implementation Notes
+# Phase 1 구현 노트
 
-## Purpose
-- This document does not expose a raw internal thought log.
-- It records the shareable engineering rationale, implementation order, and review points for Phase 1.
-- Scope is limited to CLI setup and SQL parsing. Executor and storage are intentionally excluded.
+## 목적
 
-## Phase 1 Goal
-- Read one SQL file.
-- Accept exactly one SQL statement per file.
-- Support:
+- 이 문서는 내부 사고 과정을 그대로 드러내는 용도가 아닙니다.
+- Phase 1에서 공유 가능한 설계 이유, 구현 순서, 리뷰 포인트를 정리합니다.
+- 범위는 CLI 구성과 SQL 파싱까지로 제한합니다.
+- 실행기와 저장소는 의도적으로 Phase 2에 남겨 둡니다.
+
+## Phase 1 목표
+
+- SQL 파일 하나를 읽는다.
+- 파일당 SQL 문장 하나만 허용한다.
+- 아래 문법을 지원한다.
   - `INSERT INTO [schema.]table VALUES (...);`
   - `SELECT * FROM [schema.]table;`
-- Convert the SQL text into a `Statement` AST.
-- Stop at parsing in Phase 1. Do not execute storage logic yet.
+- SQL 텍스트를 `Statement` AST로 변환한다.
+- Phase 1에서는 파싱까지만 수행하고 저장소 실행은 하지 않는다.
 
-## 1. Initial Grounding
-- Confirmed the repository was nearly empty.
-- Created `Agents.md` first and used it as persistent project memory.
-- From that point on, the working rule became:
-  - read `Agents.md` before major work,
-  - update it after design decisions or task completion.
+## 1. 초기 판단
 
-## 2. Environment Facts Found First
-- The current PowerShell environment does not have `gcc`, `clang`, or `make` on PATH.
-- `cmake` exists, but the project contract is still `Makefile`.
-- `bash.exe` and `wsl.exe` are blocked by permission errors in this shell.
-- Result:
-  - code was written to portable C11 assumptions,
-  - runtime compile verification could not be completed from this shell,
-  - this status was recorded in `Agents.md`.
+- 저장소가 거의 비어 있는 상태라는 점을 먼저 확인했다.
+- 작업 중 지속적으로 참조할 문서로 `Agents.md`를 먼저 만들었다.
+- 이후 작업 규칙은 다음과 같이 정리했다.
+  1. 큰 작업 전에 `Agents.md`를 읽는다.
+  2. 설계 결정이나 상태 변화가 생기면 `Agents.md`를 갱신한다.
 
-## 3. Why the Implementation Started with Headers
-- The user already fixed the public interfaces.
-- Because of that, the safest order was:
-  1. define shared types and function declarations,
-  2. define ownership and cleanup rules,
-  3. build the parser on top of those rules,
-  4. build the CLI around the parser,
-  5. add tests around the parser contract.
+## 2. 먼저 확인한 환경 정보
 
-## 4. Shared Type Design
+- 현재 PowerShell 환경에는 `gcc`, `clang`, `make`가 PATH에 없다.
+- `cmake`는 존재하지만 프로젝트 계약은 `Makefile` 기준이다.
+- `bash.exe`, `wsl.exe`는 권한 문제로 바로 사용하기 어렵다.
+
+따라서 다음 원칙을 잡았다.
+
+- 코드는 portable C11 기준으로 작성한다.
+- 현재 셸에서는 컴파일 검증이 막힐 수 있음을 문서에 남긴다.
+- 환경 이슈도 구현 결과의 일부로 기록한다.
+
+## 3. 왜 헤더부터 시작했는가
+
+사용자가 이미 공개 인터페이스 방향을 정한 상태였기 때문에, 가장 안전한 순서는 다음과 같았다.
+
+1. 공통 타입과 함수 선언 정리
+2. 메모리 소유권과 정리 규칙 정의
+3. 그 규칙 위에 파서 구현
+4. CLI를 파서 위에 연결
+5. 테스트로 계약을 고정
+
+## 4. 공통 타입 설계
 
 ### `SqlError`
-- C has no exception system.
-- A plain integer return value is not enough for useful debugging.
-- `SqlError` stores:
+
+- C에는 예외 시스템이 없다.
+- 단순한 정수 반환값만으로는 디버깅 정보가 부족하다.
+- 그래서 `SqlError`는 아래 정보를 가진다.
   - `code`
   - `position`
   - `message`
-- This makes parser failures observable and reviewable.
+
+이 구조 덕분에 “왜 실패했는지”와 “어디에서 실패했는지”를 함께 볼 수 있다.
 
 ### `Statement`
-- MVP only needs two statement kinds:
+
+- MVP에서는 두 종류의 문장만 필요하다.
   - `STMT_INSERT`
   - `STMT_SELECT`
-- Common fields:
+- 공통 필드는 다음과 같다.
   - `type`
   - `schema`
   - `table`
-- Insert-specific payload:
+- `INSERT` 전용 데이터는 다음과 같다.
   - `values`
   - `value_count`
-- `SELECT *` needs no column list in Phase 1.
+
+`SELECT *`만 지원하므로 Phase 1에서는 컬럼 목록 구조가 필요 없다.
 
 ### `SqlValue`
-- Values are either integers or strings.
-- A tagged union was chosen:
-  - `type` tells which variant is active,
-  - the union stores the actual payload.
-- This keeps the representation compact and reusable for Phase 2 CSV output.
 
-## 5. Memory Ownership Strategy
-- The first critical C design question was ownership.
-- The chosen rule is heap-owned AST data:
-  - parser deep-copies identifiers and string literals,
-  - parser allocates the `values` array,
-  - caller owns the successful `Statement`,
-  - caller must release it with `statement_free`.
+- 값은 정수 또는 문자열 두 종류만 지원한다.
+- 그래서 tagged union 형태를 사용했다.
+  - `type`이 현재 값 종류를 나타낸다.
+  - union이 실제 payload를 저장한다.
 
-### Why this strategy
-- AST lifetime is decoupled from the input SQL buffer lifetime.
-- The CLI can free the original file buffer without invalidating the AST.
-- Tests stay simple because they do not depend on input string lifetime.
+이 구조는 메모리를 낭비하지 않으면서도 Phase 2 CSV 출력으로 이어가기 쉽다.
 
-### Success and failure behavior
-- On success:
-  - `out` receives ownership of all heap data.
-- On failure:
-  - the parser frees all partially built allocations before returning.
-- This keeps the caller from dealing with partially initialized cleanup.
+## 5. 메모리 소유권 전략
 
-## 6. Why a Manual Scanner Was Chosen Instead of `strtok`
-- SQL parsing needs context-sensitive control over:
-  - whitespace,
-  - punctuation,
-  - keywords,
-  - quoted strings,
-  - exact error position.
-- `strtok` was rejected because it:
-  - mutates the input buffer,
-  - makes position tracking harder,
-  - handles quoted strings poorly,
-  - is awkward for tokens like `.`, `(`, `)`, `,`, `;`.
-- A manual scanner was used instead:
-  - `Parser { input, length, pos }`
-  - helper functions inspect and advance one region at a time.
+이 프로젝트에서 가장 중요한 C 설계 포인트는 소유권이다.
 
-## 7. Parser Construction Order
+선택한 규칙은 “파서가 AST를 힙에 완전히 구성하고, 성공 시 호출자가 소유권을 갖는다”이다.
 
-### 7-1. Minimal scanner helpers
+- 파서는 식별자와 문자열 리터럴을 deep copy 한다.
+- 파서는 `values` 배열을 할당한다.
+- 성공한 `Statement`의 소유자는 호출자다.
+- 호출자는 `statement_free`로 정리해야 한다.
+
+### 이 전략의 장점
+
+- AST 수명이 원본 SQL 버퍼 수명에 묶이지 않는다.
+- CLI는 파싱 뒤 원본 파일 버퍼를 바로 해제할 수 있다.
+- 테스트도 입력 문자열의 생존 기간을 신경 쓰지 않아도 된다.
+
+### 성공과 실패 시 동작
+
+- 성공 시
+  - `out`이 전체 AST 소유권을 받는다.
+- 실패 시
+  - 파서가 부분적으로 만든 할당도 내부에서 정리한다.
+
+즉, 호출자는 실패한 `Statement`의 중간 상태를 복구할 필요가 없다.
+
+## 6. 왜 `strtok` 대신 수동 스캐너를 썼는가
+
+SQL 파싱은 다음 요소를 세밀하게 다뤄야 한다.
+
+- 공백
+- 문장 부호
+- 키워드
+- 따옴표 문자열
+- 정확한 에러 위치
+
+`strtok`는 이 작업에 맞지 않았다.
+
+- 입력 버퍼를 직접 변경한다.
+- 위치 추적이 어렵다.
+- quoted string 처리에 약하다.
+- `.`, `(`, `)`, `,`, `;` 같은 문자를 다루기 불편하다.
+
+그래서 다음 구조의 수동 스캐너를 사용했다.
+
+- `Parser { input, length, pos }`
+- 보조 함수들이 현재 위치를 검사하고 조금씩 전진한다.
+
+## 7. 파서 구현 순서
+
+### 7-1. 최소 스캐너 헬퍼
+
+먼저 다음 함수들을 만들었다.
+
 - `current_char`
 - `skip_whitespace`
 - `copy_substring`
 - `match_keyword`
 - `expect_keyword`
 
-These functions define the basic "read at current position, then advance" model.
+이 함수들이 “현재 위치를 읽고, 필요하면 앞으로 전진한다”는 기본 모델을 만든다.
 
-### 7-2. Identifier parsing
-- `parse_identifier` accepts `[A-Za-z_]` followed by `[A-Za-z0-9_]*`.
-- `parse_qualified_name` reads either:
+### 7-2. 식별자 파싱
+
+- `parse_identifier`는 `[A-Za-z_]`로 시작하고 뒤에 `[A-Za-z0-9_]*`가 오는 이름을 읽는다.
+- `parse_qualified_name`은 아래 둘 중 하나를 읽는다.
   - `table`
   - `schema.table`
 
-### 7-3. Literal parsing
-- Integer literals use `strtoll`.
-- String literals copy the content between single quotes.
-- Quote escaping is intentionally not supported in MVP.
+### 7-3. 리터럴 파싱
 
-### 7-4. VALUES list parsing
-- Confirm `(`.
-- Parse one value.
-- Repeatedly accept either:
-  - `,` and another value,
-  - `)` to finish.
-- Empty `()` is rejected in MVP.
+- 정수는 `strtoll`로 처리한다.
+- 문자열은 작은따옴표 사이 내용을 복사한다.
+- MVP에서는 문자열 escape를 지원하지 않는다.
 
-### 7-5. Statement parsing
-- `INSERT` path:
-  - `INTO`
-  - target table
-  - `VALUES`
-  - values list
-- `SELECT` path:
-  - `*`
-  - `FROM`
-  - target table
+### 7-4. VALUES 리스트 파싱
 
-### 7-6. Statement termination
-- Require a final `;`.
-- Allow only trailing whitespace after `;`.
-- This enforces the "one statement per file" rule.
+동작 순서는 다음과 같다.
 
-## 8. Why `parse_sql` Uses a Temporary Local `Statement`
-- `parse_sql` builds a local `Statement stmt` first.
-- If parsing fails halfway, that local object can be cleaned safely.
-- Only on success does the function transfer it with `*out = stmt`.
-- This avoids leaving the caller with a half-built object.
+1. `(` 확인
+2. 값 하나 파싱
+3. 이후에는 아래 둘 중 하나만 허용
+   - `,` 다음 또 다른 값
+   - `)` 로 종료
 
-## 9. CLI Construction
-- `main.c` was intentionally kept small in Phase 1.
-- Execution order:
-  1. validate CLI arguments,
-  2. read the SQL file into memory,
-  3. call `parse_sql`,
-  4. print a normalized AST summary on success,
-  5. print code, position, and message on failure.
-- `execute_statement` is not called yet by design.
+빈 `()`는 MVP에서 허용하지 않는다.
 
-## 10. Test Construction
-- Tests were written as a single C executable without external frameworks.
-- Reasons:
-  - minimal dependency surface,
-  - easy to compile in a basic C environment,
-  - each test also documents one parser behavior.
+### 7-5. 문장 파싱
 
-### Success cases added
-- simple insert
-- simple select
-- qualified schema name
-- mixed case keywords
-- extra whitespace and newlines
-- negative integer
+`INSERT` 경로는 다음 순서다.
 
-### Failure cases added
-- missing semicolon
-- column list in select
-- unterminated string
-- multiple statements
-- where clause usage
+- `INTO`
+- 대상 테이블
+- `VALUES`
+- 값 목록
 
-## 11. Ongoing Design Rules During Implementation
-- Keep Phase 1 focused on parsing only.
-- Keep ownership explicit.
-- Record error positions as close to the actual fault as possible.
-- Do not silently expand beyond the MVP grammar.
-- Do not mix executor or storage behavior into the parser phase.
+`SELECT` 경로는 다음 순서다.
 
-## 12. Intentional Non-Features in Phase 1
-- no string escape support
-- no floating point numbers
-- no `WHERE`
-- no column selection
-- no multiple statements
-- no CSV read/write execution
-- no implementation yet for:
+- `*`
+- `FROM`
+- 대상 테이블
+
+### 7-6. 문장 종료 처리
+
+- 마지막 `;`를 반드시 요구한다.
+- `;` 뒤에는 trailing whitespace만 허용한다.
+
+이렇게 해서 “파일당 문장 하나” 규칙을 강제한다.
+
+## 8. 왜 `parse_sql`이 임시 `Statement`를 쓰는가
+
+`parse_sql`은 호출자 `out`에 바로 쓰지 않고, 로컬 `Statement stmt`를 먼저 구성한다.
+
+이 방식의 장점은 다음과 같다.
+
+- 중간에 실패해도 로컬 객체만 안전하게 정리하면 된다.
+- 호출자는 반쯤 채워진 객체를 받지 않는다.
+- 성공한 경우에만 `*out = stmt`로 소유권을 넘기면 된다.
+
+## 9. CLI 설계
+
+`main.c`는 Phase 1에서 일부러 단순하게 유지했다.
+
+흐름은 다음과 같다.
+
+1. 인자 검증
+2. SQL 파일 전체 읽기
+3. `parse_sql` 호출
+4. 성공 시 AST 요약 출력
+5. 실패 시 에러 코드, 위치, 메시지 출력
+
+의도적으로 `execute_statement`는 호출하지 않는다.
+
+## 10. 테스트 설계
+
+테스트는 외부 프레임워크 없이 단일 C 실행 파일로 만들었다.
+
+이유는 다음과 같다.
+
+- 의존성을 최소화할 수 있다.
+- 단순한 C 환경에서 컴파일이 쉽다.
+- 각 테스트가 파서 계약을 설명하는 문서 역할도 한다.
+
+### 추가한 성공 케이스
+
+- 단순 INSERT
+- 단순 SELECT
+- schema 포함 이름
+- 혼합 대소문자 키워드
+- 과한 공백과 개행
+- 음수 정수
+
+### 추가한 실패 케이스
+
+- 세미콜론 누락
+- SELECT 컬럼 목록 사용
+- 닫히지 않은 문자열
+- 다중 문장
+- WHERE 절 사용
+
+## 11. 구현 중 유지한 규칙
+
+- Phase 1은 파싱에만 집중한다.
+- 소유권을 항상 명시적으로 유지한다.
+- 에러 위치는 가능한 실제 실패 지점에 가깝게 기록한다.
+- MVP 문법 밖 기능을 조용히 확장하지 않는다.
+- 실행기/저장소 로직을 파서 단계에 섞지 않는다.
+
+## 12. Phase 1에서 의도적으로 뺀 기능
+
+- 문자열 escape 미지원
+- 부동소수점 미지원
+- `WHERE` 미지원
+- 컬럼 선택 미지원
+- 다중 문장 미지원
+- CSV 읽기/쓰기 실행 미지원
+- 아래 함수는 스텁만 유지
   - `execute_statement`
   - `storage_append_row`
 
-## 13. Review Questions to Confirm Understanding
-- Why is the manual scanner a better fit than `strtok` here?
-- Who owns `Statement` memory after `parse_sql` succeeds?
-- Why is a local temporary `Statement` safer than writing directly into `out` from the start?
-- Why is `err.position` valuable during debugging?
+## 13. 리뷰할 때 확인하면 좋은 질문
 
-## 14. Current Status
-- Phase 1 implementation is complete.
-- Phase 2 has not started.
-- `Agents.md` has been updated with current state.
-- Compile and runtime verification are still pending because the current shell lacks a usable compiler toolchain.
+- 왜 수동 스캐너가 `strtok`보다 이 문제에 잘 맞는가
+- `parse_sql` 성공 후 `Statement` 메모리 소유자는 누구인가
+- 처음부터 `out`에 직접 쓰지 않고 임시 `Statement`를 쓰는 이유는 무엇인가
+- `err.position`이 디버깅에 왜 중요한가
 
-## 15. Post-review Structure Refactor
-- The parser remains the teaching center of the project.
-- Public headers are now split by role:
-  - shared constants
-  - error handling
-  - AST types
+## 14. 현재 상태
+
+- Phase 1 구현은 완료되었다.
+- Phase 2는 아직 시작하지 않았다.
+- 현재 상태는 `Agents.md`에도 반영되어 있다.
+- 한동안은 현재 셸에 툴체인이 없어 컴파일 검증이 막혀 있었지만, 이후 Windows Dev-Cpp MinGW 기준 직접 빌드와 테스트를 수행했다.
+
+## 15. 리뷰 후 구조 리팩터링
+
+- 파서는 여전히 프로젝트의 학습 중심이다.
+- 공개 헤더는 역할별로 나누었다.
+  - 공통 상수
+  - 에러 처리
+  - AST 타입
   - parser API
   - executor API
   - storage API
-- `include/sql_processor.h` remains as a convenience umbrella include so entry-level readers still have a simple starting point.
-- `execute_statement` and `storage_append_row` now exist as explicit stub modules.
-- This keeps the Phase 1 code easy to learn while making the Phase 2 extension points visible in the actual build graph.
-- Some earlier line-by-line review references in this document describe the pre-refactor layout and should be refreshed after the next compile-capable review pass.
-
-## 15. Code Review Focus Map
-
-### 15-1. Public contract and type boundaries
-- Check `include/sql_processor.h:11-66`.
-- Review points:
-  - whether `SqlError` carries enough information for parser and executor stages,
-  - whether `Statement` is minimal but sufficient for MVP,
-  - whether `SqlValue` is the right tagged-union shape for later CSV serialization,
-  - whether helper APIs like `statement_init` and `statement_free` are correctly exposed.
-
-### 15-2. AST initialization and cleanup discipline
-- Check `src/statement.c:6-32`.
-- Review points:
-  - whether every heap-owned field is released,
-  - whether cleanup is safe when only part of the AST was initialized,
-  - whether `statement_init` after free prevents stale pointers and double-free risk.
-
-### 15-3. Error reporting pattern
-- Check `src/parser.c:16-39`.
-- Review points:
-  - whether `clear_error` and `set_error` are called consistently,
-  - whether the `position` recorded is close enough to the real fault,
-  - whether error codes distinguish lexical, parse, unsupported, and memory failures clearly enough.
-
-### 15-4. Scanner movement and keyword matching
-- Check `src/parser.c:57-123`.
-- Review points:
-  - whether `current_char` handles end-of-buffer safely,
-  - whether `skip_whitespace` is applied at the right times,
-  - whether `match_keyword` correctly rejects prefixes such as `SELECTED`,
-  - whether case-insensitive matching is limited to ASCII in an intentional way.
-
-### 15-5. Identifier parsing and qualified name parsing
-- Check `src/parser.c:126-180`.
-- Review points:
-  - whether identifier syntax matches the intended grammar,
-  - whether `schema.table` and plain `table` are both handled cleanly,
-  - whether memory allocated for the first identifier is freed correctly if parsing the second identifier fails.
-
-### 15-6. Integer and string literal parsing
-- Check `src/parser.c:194-267`.
-- Review points:
-  - whether signed integers are accepted correctly,
-  - whether `strtoll` failure and range overflow are handled,
-  - whether unterminated strings are reported at the right location,
-  - whether the current no-escape-string rule is explicit enough for MVP.
-
-### 15-7. Dynamic array growth and VALUES list ownership
-- Check `src/parser.c:269-357`.
-- Review points:
-  - whether a string value is freed if `realloc` fails,
-  - whether `append_value` copies the union payload safely,
-  - whether empty `VALUES ()` is rejected intentionally,
-  - whether comma and closing parenthesis handling is strict enough.
-
-### 15-8. Statement-level parse flow and cleanup on failure
-- Check `src/parser.c:360-456`.
-- Review points:
-  - whether `INSERT` and `SELECT` paths are separated cleanly,
-  - whether unsupported syntax fails early and explicitly,
-  - whether the final semicolon and trailing-content checks correctly enforce one statement per file,
-  - whether `statement_free(&stmt)` is called on every failure path after allocation may have happened,
-  - whether ownership moves to `out` only on success.
-
-### 15-9. CLI file read path and resource lifetime
-- Check `src/main.c:15-63` and `src/main.c:98-133`.
-- Review points:
-  - whether file size discovery and full-buffer read are handled safely,
-  - whether the SQL text buffer is always freed on parser failure,
-  - whether `statement_free` is called on success,
-  - whether Phase 1 intentionally stops after parse summary and does not leak into executor work.
-
-### 15-10. Test coverage quality
-- Check `tests/test_parser.c:15-161`.
-- Review points:
-  - whether the tests reflect the MVP grammar exactly,
-  - whether both success and failure paths are covered,
-  - whether unsupported syntax tests are strong enough,
-  - whether any important edge case is still missing.
-
-## 16. Explanation-to-Code Index
-
-### "Why not `strtok`?"
-- Primary code:
-  - `src/parser.c:57-123`
-  - `src/parser.c:396-456`
-- Explain:
-  - parser state is tracked with `pos`,
-  - input is not mutated,
-  - exact failure position is preserved,
-  - grammar tokens are consumed under parser control.
-
-### "How does the parser walk through the SQL string?"
-- Primary code:
-  - `src/parser.c:65-69`
-  - `src/parser.c:112-123`
-  - `src/parser.c:312-357`
-  - `src/parser.c:396-456`
-- Explain:
-  - skip whitespace,
-  - expect or match the next grammar element,
-  - advance `pos`,
-  - stop on the first invalid token and record the fault.
-
-### "How is heap ownership managed?"
-- Primary code:
-  - `include/sql_processor.h:32-52`
-  - `src/parser.c:72-85`
-  - `src/parser.c:280-292`
-  - `src/parser.c:396-456`
-  - `src/statement.c:14-32`
-- Explain:
-  - copied identifiers and strings live on the heap,
-  - values array grows with `realloc`,
-  - successful parse transfers ownership to caller,
-  - `statement_free` is the single cleanup gate.
-
-### "Why use `out` and `err` pointers?"
-- Primary code:
-  - `include/sql_processor.h:48-66`
-  - `src/parser.c:16-39`
-  - `src/parser.c:396-456`
-  - `src/main.c:119-127`
-- Explain:
-  - return value controls success vs failure,
-  - `out` carries the AST only on success,
-  - `err` carries structured failure detail,
-  - caller logic stays linear and explicit.
-
-### "Where is the one-statement-only rule enforced?"
-- Primary code:
-  - `src/parser.c:440-452`
-- Explain:
-  - parser requires `;`,
-  - then skips trailing whitespace,
-  - then rejects any remaining non-whitespace input.
-
-### "Where are unsupported grammar decisions encoded?"
-- Primary code:
-  - `src/parser.c:324-327`
-  - `src/parser.c:383-385`
-  - `src/parser.c:435-437`
-  - `src/parser.c:449-451`
-  - `tests/test_parser.c:79-123`
-- Explain:
-  - empty `VALUES` is rejected,
-  - only `SELECT *` is allowed,
-  - only `INSERT` and `SELECT` statements are accepted,
-  - multiple statements are rejected,
-  - tests lock these choices in.
-
-### "Where should Phase 1 review stop and Phase 2 begin?"
-- Primary code:
-  - `src/main.c:87-96`
-  - `src/main.c:119-129`
-  - `include/sql_processor.h:59-66`
-- Explain:
-  - `execute_statement` and `storage_append_row` exist only as contracts,
-  - Phase 1 CLI stops after parse summary,
-  - no CSV execution logic is present yet.
+- `include/sql_processor.h`는 여전히 편의용 우산 헤더로 남겨 두었다.
+- `execute_statement`, `storage_append_row`는 명시적인 스텁 모듈로 분리했다.
+- 덕분에 Phase 1 코드는 읽기 쉽게 유지하면서도, Phase 2 확장 지점은 빌드 구조에 드러나게 되었다.
+- 이 문서의 일부 라인 번호 기반 리뷰 메모는 리팩터링 이전 기준일 수 있으므로, 다음 정리 때 최신 파일 위치에 맞춰 갱신하는 것이 좋다.

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 수동 스캐너의 현재 위치를 추적하는 상태 구조다. */
 typedef struct Parser {
     const char *input;
     size_t length;
@@ -57,6 +58,7 @@ static char *copy_substring(const char *start, size_t length) {
     return buffer;
 }
 
+/* 예약어 뒤에 식별자가 바로 붙는 경우를 막아 정확한 키워드만 소비한다. */
 static int match_keyword(Parser *parser, const char *keyword) {
     size_t start;
     size_t i;
@@ -204,6 +206,7 @@ static int parse_integer_value(Parser *parser, SqlValue *value, SqlError *err) {
     return SQL_SUCCESS;
 }
 
+/* MVP에서는 escape 없이 작은따옴표로 감싼 문자열만 허용한다. */
 static int parse_string_value(Parser *parser, SqlValue *value, SqlError *err) {
     size_t start;
     size_t length;
@@ -265,6 +268,7 @@ static int append_value(Statement *stmt, const SqlValue *value, SqlError *err, s
     return SQL_SUCCESS;
 }
 
+/* 값 종류를 보고 정수 파서와 문자열 파서 중 하나로 분기한다. */
 static int parse_value(Parser *parser, SqlValue *out, SqlError *err) {
     skip_whitespace(parser);
     memset(out, 0, sizeof(*out));
@@ -282,6 +286,7 @@ static int parse_value(Parser *parser, SqlValue *out, SqlError *err) {
     return SQL_FAILURE;
 }
 
+/* VALUES (...) 내부를 순서대로 읽어 가변 길이 배열로 축적한다. */
 static int parse_values_list(Parser *parser, Statement *stmt, SqlError *err) {
     int saw_value;
 
@@ -333,6 +338,7 @@ static int parse_values_list(Parser *parser, Statement *stmt, SqlError *err) {
     }
 }
 
+/* INSERT 문의 나머지 문법을 읽고 Statement를 채운다. */
 static int parse_insert(Parser *parser, Statement *stmt, SqlError *err) {
     stmt->type = STMT_INSERT;
 
@@ -352,6 +358,7 @@ static int parse_insert(Parser *parser, Statement *stmt, SqlError *err) {
     return parse_values_list(parser, stmt, err);
 }
 
+/* SELECT는 Phase 1에서 SELECT * FROM ... 형태만 허용한다. */
 static int parse_select(Parser *parser, Statement *stmt, SqlError *err) {
     stmt->type = STMT_SELECT;
 
@@ -369,6 +376,7 @@ static int parse_select(Parser *parser, Statement *stmt, SqlError *err) {
     return parse_qualified_name(parser, stmt, err);
 }
 
+/* Phase 1 파서의 진입점이다. 성공 시에만 완성된 AST를 호출자에게 넘긴다. */
 int parse_sql(const char *sql, Statement *out, SqlError *err) {
     Parser parser;
     Statement stmt;
@@ -420,6 +428,7 @@ int parse_sql(const char *sql, Statement *out, SqlError *err) {
         return SQL_FAILURE;
     }
 
+    /* 세미콜론 뒤에 남는 문자가 있으면 다중 문장으로 간주해 실패시킨다. */
     skip_whitespace(&parser);
     if (current_char(&parser) != ';') {
         statement_free(&stmt);

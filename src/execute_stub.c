@@ -1,5 +1,6 @@
 #include "execute.h"
 
+/* Phase 2 전까지는 링크 구조만 유지하고 실제 실행은 막는다. */
 int execute_statement(const Statement *stmt, const char *data_dir, FILE *out, SqlError *err) {
     (void) stmt;
     (void) data_dir;

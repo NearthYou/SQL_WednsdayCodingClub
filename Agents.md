@@ -1,86 +1,97 @@
 # Agents Memory
 
-## Project Requirements
-- Language: C (C11 baseline)
-- CLI entry: `./sql_processor <sql_file> [data_dir]`
-- Read exactly one SQL statement from a file, parse it, and execute it later
-- Project layout: `src/`, `include/`, `tests/`, `data/`, `queries/`, `Makefile`
+## 프로젝트 요구사항
 
-## Required Interfaces
+- 언어: C (C11 기준)
+- CLI 진입점: `./sql_processor <sql_file> [data_dir]`
+- SQL 파일에서 문장 하나를 읽고 파싱한 뒤, 이후 단계에서 실행할 수 있어야 함
+- 프로젝트 구조: `src/`, `include/`, `tests/`, `data/`, `queries/`, `Makefile`
+
+## 필수 인터페이스
+
 - `parse_sql(const char *sql, Statement *out, SqlError *err)`
 - `execute_statement(const Statement *stmt, const char *data_dir, FILE *out, SqlError *err)`
 - `storage_append_row(...)`
 
-## MVP Grammar
+## MVP 문법
+
 - `INSERT INTO [schema.]table VALUES (...);`
 - `SELECT * FROM [schema.]table;`
-- Strings use single quotes
-- Numbers are integers only
-- No `WHERE`, no column list, no multiple statements
-- Mixed-case keywords and flexible whitespace/newlines must be supported
+- 문자열은 작은따옴표 사용
+- 숫자는 정수만 지원
+- `WHERE`, 컬럼 목록, 다중 문장은 지원하지 않음
+- 키워드는 대소문자를 구분하지 않고, 공백과 개행을 유연하게 허용해야 함
 
-## Storage Rules
-- CSV only
-- Header already exists
-- `table` maps to `table.csv`
-- `schema.table` maps to `schema__table.csv`
-- Files live under `data/`
+## 저장소 규칙
 
-## Demo Data / Queries
-- Demo CSV: `users.csv`
-- Demo insert: `INSERT INTO users VALUES (1, 'alice', 20);`
-- Demo select: `SELECT * FROM users;`
+- CSV만 사용
+- 헤더는 이미 존재한다고 가정
+- `table`은 `table.csv`로 매핑
+- `schema.table`은 `schema__table.csv`로 매핑
+- 파일은 `data/` 아래에 위치
 
-## Action Plan
+## 데모 데이터 / 쿼리
 
-### Phase 1 - CLI and Parser
-- [x] Create project directories and `Makefile`
-- [x] Implement CLI entrypoint and argument handling
-- [x] Define `SqlError` and `Statement` in `include/`
-- [x] Implement `parse_sql`
-- [x] Add parser unit tests
+- 데모 CSV: `users.csv`
+- 데모 INSERT: `INSERT INTO users VALUES (1, 'alice', 20);`
+- 데모 SELECT: `SELECT * FROM users;`
 
-### Phase 2 - Executor and Storage
-- [ ] Implement storage module and `storage_append_row`
-- [ ] Implement executor and `execute_statement`
-- [ ] Integrate CLI -> Parser -> Executor -> Storage
-- [ ] Add integration and edge case tests
+## 작업 계획
 
-## Current Status Checklist
-- [x] Initial repository inspection completed
-- [x] Phase plan drafted
-- [x] Agents.md created and synced during implementation
-- [x] Phase 1 implementation completed
-- [x] Phase 1 review completed
-- [x] Post-review structure refactor completed
-- [ ] User approved Phase 2 start
+### Phase 1 - CLI와 파서
 
-## Architecture Decisions
-- Phase 1 only for now. Do not implement Phase 2 behavior until the user explicitly approves moving on after review.
-- Parser uses a manual scanner, not `strtok`.
-- AST uses heap-owned strings and value arrays.
-- Add `statement_init` and `statement_free` helper APIs for deterministic cleanup.
-- Error reporting uses `int` return code with `out` and `err` output parameters.
-- Baseline build target is WSL/Linux with `make`, but code should remain portable C11.
-- `parse_sql` builds a temporary `Statement` and only transfers ownership to the caller on success.
-- Phase 1 CLI reads the SQL file, parses it, and prints an AST summary instead of executing storage logic.
-- String literals do not support quote escaping in MVP.
-- Public headers are split by concern, while `include/sql_processor.h` remains as a convenience umbrella include.
-- Phase 2 boundaries are compiled as explicit stubs so the link graph already reflects the intended architecture.
+- [x] 프로젝트 디렉터리와 `Makefile` 생성
+- [x] CLI 진입점과 인자 처리 구현
+- [x] `include/`에 `SqlError`, `Statement` 정의
+- [x] `parse_sql` 구현
+- [x] parser 단위 테스트 추가
 
-## Context Notes
-- Current Windows shell does not have `gcc`, `clang`, or `make` on PATH.
-- `cmake` exists, but the project contract remains `Makefile`.
-- `git status` is currently blocked by Git safe-directory ownership settings, so avoid relying on git commands unless needed.
-- `bash.exe` and `wsl.exe` access are currently blocked by service permission errors, so local `make test` verification could not be executed from this shell.
-- Demo assets were created: `data/users.csv`, `queries/insert_users.sql`, `queries/select_users.sql`.
-- Phase 1 rationale and implementation flow document added: `PHASE1_IMPLEMENTATION_NOTES.md`.
-- `PHASE1_IMPLEMENTATION_NOTES.md` includes code review focus areas; some exact line mappings now predate the post-review refactor.
+### Phase 2 - 실행기와 저장소
 
-## Review Log
-- Phase 1 code implemented: project skeleton, CLI, AST types, parser, and parser tests.
-- Verification status: static review completed, compile/runtime verification blocked by missing compiler toolchain in the current shell.
-- Documentation added: step-by-step implementation rationale and review notes in `PHASE1_IMPLEMENTATION_NOTES.md`.
-- Documentation refined: review checkpoints now point to exact source files and line ranges.
-- Post-review refactor applied: split headers by module and added `execute` / `storage` stub modules without changing Phase 1 scope.
-- Pending: explain Phase 1 internals, review with the user, and wait for explicit approval before any Phase 2 code.
+- [ ] 저장소 모듈과 `storage_append_row` 구현
+- [ ] 실행기와 `execute_statement` 구현
+- [ ] CLI -> Parser -> Executor -> Storage 통합
+- [ ] 통합 테스트와 경계 케이스 테스트 추가
+
+## 현재 상태 체크리스트
+
+- [x] 초기 저장소 확인 완료
+- [x] 단계별 계획 작성 완료
+- [x] 구현 중 `Agents.md` 생성 및 동기화 완료
+- [x] Phase 1 구현 완료
+- [x] Phase 1 리뷰 완료
+- [x] 리뷰 후 구조 리팩터링 완료
+- [ ] 사용자 승인 후 Phase 2 시작 예정
+
+## 아키텍처 결정
+
+- 지금은 Phase 1까지만 다룸. 사용자가 명시적으로 승인하기 전에는 Phase 2 동작을 구현하지 않음.
+- 파서는 `strtok` 대신 수동 스캐너를 사용함.
+- AST는 힙에 할당된 문자열과 값 배열을 사용함.
+- 예측 가능한 정리를 위해 `statement_init`, `statement_free`를 제공함.
+- 에러는 `int` 반환값과 `out` / `err` 출력 파라미터 조합으로 전달함.
+- 기본 빌드 기준은 WSL/Linux `make`지만, 코드는 가능한 한 portable C11로 유지함.
+- `parse_sql`은 임시 `Statement`를 먼저 만든 뒤 성공 시에만 호출자에게 소유권을 넘김.
+- Phase 1 CLI는 파일을 읽고 파싱 결과 요약만 출력하며, 저장소 실행은 하지 않음.
+- MVP에서는 문자열 escape를 지원하지 않음.
+- 공개 헤더는 역할별로 나누고, `include/sql_processor.h`는 편의용 우산 헤더로 유지함.
+- Phase 2 경계는 실제 링크 구조에 드러나도록 스텁 모듈로 분리해 둠.
+
+## 컨텍스트 메모
+
+- 현재 Windows 셸에는 `gcc`, `clang`, `make`가 PATH에 없음.
+- `cmake`는 있지만 프로젝트 계약은 여전히 `Makefile` 기준임.
+- 과거에는 `git safe.directory` 설정이 없어 Git 명령이 막혔음.
+- `bash.exe`, `wsl.exe`는 권한 문제로 로컬 `make test` 검증에 바로 쓰기 어려웠음.
+- 데모 자산으로 `data/users.csv`, `queries/insert_users.sql`, `queries/select_users.sql`를 추가함.
+- Phase 1 구현 배경과 리뷰 포인트는 `PHASE1_IMPLEMENTATION_NOTES.md`에 정리함.
+- `PHASE1_IMPLEMENTATION_NOTES.md`의 일부 라인 번호 기반 설명은 리팩터링 이전 기준일 수 있음.
+
+## 리뷰 로그
+
+- Phase 1 코드 구현 완료: 프로젝트 뼈대, CLI, AST 타입, parser, parser 테스트
+- 정적 리뷰 완료
+- 로컬 빌드/실행 검증은 툴체인 제약 때문에 한동안 보류됐지만, 이후 Windows Dev-Cpp MinGW 기준 직접 검증 완료
+- `PHASE1_IMPLEMENTATION_NOTES.md`에 구현 배경과 리뷰 포인트 문서화 완료
+- 리뷰 후 헤더 역할 분리, `execute` / `storage` 스텁 모듈 추가 완료
+- 현재 PR 브랜치에는 GitHub Actions 기반 CI/CD도 추가됨

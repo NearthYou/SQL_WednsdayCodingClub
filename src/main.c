@@ -13,6 +13,7 @@
 #define LONG_LONG_FMT "%lld"
 #endif
 
+/* SQL 파일 전체를 메모리에 올려 parser가 한 번에 읽을 수 있게 한다. */
 static char *read_entire_file(const char *path, SqlError *err) {
     FILE *file;
     long size;
@@ -64,6 +65,7 @@ static char *read_entire_file(const char *path, SqlError *err) {
     return buffer;
 }
 
+/* 사람이 읽을 수 있는 요약 형태로 AST를 출력한다. */
 static void print_target(const Statement *stmt) {
     if (stmt->schema != NULL) {
         printf("Target: %s.%s\n", stmt->schema, stmt->table);
@@ -132,6 +134,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    /* Phase 1은 파싱 결과 확인까지가 목적이므로 실행기로 넘기지 않는다. */
     print_statement_summary(&stmt, data_dir);
 
     statement_free(&stmt);

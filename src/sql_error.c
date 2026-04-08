@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+/* 같은 SqlError 인스턴스를 여러 호출에서 재사용할 수 있게 초기화한다. */
 void sql_error_clear(SqlError *err) {
     if (err == NULL) {
         return;
@@ -13,6 +14,7 @@ void sql_error_clear(SqlError *err) {
     err->message[0] = '\0';
 }
 
+/* 모든 실패 지점을 같은 형식으로 기록하기 위한 공통 함수다. */
 void sql_error_set(SqlError *err, SqlErrorCode code, size_t position, const char *fmt, ...) {
     va_list args;
 
