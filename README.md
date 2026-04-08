@@ -18,6 +18,40 @@ SQL 파일 안의 `INSERT`와 `SELECT` 문장을 파싱하고, schema 규칙에 
 
 ---
 
+## 구조도
+
+```mermaid
+flowchart LR
+    A[SQL File] --> B[Manual Parser]
+    B --> C[AST<br/>Statement / SqlScript]
+    C --> D[Executor]
+    D --> E[Storage]
+    E --> F[CSV]
+    E --> G[schema.csv]
+```
+
+---
+
+## 플로우차트
+
+```mermaid
+flowchart TD
+    A[SQL Input] --> B{INSERT exists?}
+    B -- No --> C[SELECT]
+    B -- Yes --> D[Stage Dir]
+    D --> E[Copy CSV / schema]
+    E --> F[Column Mapping]
+    F --> G[Type Validation]
+    G --> H{All Success?}
+    H -- Yes --> I[Commit]
+    H -- No --> J[Rollback]
+    C --> K[Output]
+    I --> K
+    J --> L[Error]
+```
+
+---
+
 ## 핵심 설계
 
 | 설계 포인트 | 선택한 방식 | 이유 |
