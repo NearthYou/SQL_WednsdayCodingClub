@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -254,9 +255,18 @@ static void free_value(SqlValue *value) {
 }
 
 static int append_value(Statement *stmt, const SqlValue *value, SqlError *err, size_t position) {
+    size_t new_count;
+    size_t new_size;
     SqlValue *expanded;
 
-    expanded = (SqlValue *) realloc(stmt->values, (stmt->value_count + 1) * sizeof(*stmt->values));
+    if (stmt->value_count >= SIZE_MAX / sizeof(*stmt->values)) {
+        sql_error_set(err, SQL_ERR_MEMORY, position, "VALUES list is too large to allocate safely");
+        return SQL_FAILURE;
+    }
+
+    new_count = stmt->value_count + 1;
+    new_size = new_count * sizeof(*stmt->values);
+    expanded = (SqlValue *) realloc(stmt->values, new_size);
     if (expanded == NULL) {
         sql_error_set(err, SQL_ERR_MEMORY, position, "Out of memory while growing VALUES list");
         return SQL_FAILURE;
@@ -288,29 +298,21 @@ static int parse_value(Parser *parser, SqlValue *out, SqlError *err) {
 
 /* VALUES (...) 내부를 순서대로 읽어 가변 길이 배열로 축적한다. */
 static int parse_values_list(Parser *parser, Statement *stmt, SqlError *err) {
-    int saw_value;
-
     if (consume_char(parser, '(', err) != SQL_SUCCESS) {
         return SQL_FAILURE;
     }
 
-    saw_value = 0;
+    skip_whitespace(parser);
+    if (current_char(parser) == ')') {
+        sql_error_set(err,
+                      SQL_ERR_UNSUPPORTED,
+                      parser->pos,
+                      "VALUES list must contain at least one literal");
+        return SQL_FAILURE;
+    }
+
     while (1) {
         SqlValue value;
-
-        skip_whitespace(parser);
-        if (current_char(parser) == ')') {
-            if (!saw_value) {
-                sql_error_set(err,
-                              SQL_ERR_UNSUPPORTED,
-                              parser->pos,
-                              "VALUES list must contain at least one literal");
-                return SQL_FAILURE;
-            }
-
-            parser->pos++;
-            return SQL_SUCCESS;
-        }
 
         if (parse_value(parser, &value, err) != SQL_SUCCESS) {
             return SQL_FAILURE;
@@ -321,16 +323,24 @@ static int parse_values_list(Parser *parser, Statement *stmt, SqlError *err) {
             return SQL_FAILURE;
         }
 
-        saw_value = 1;
         skip_whitespace(parser);
-        if (current_char(parser) == ',') {
-            parser->pos++;
-            continue;
-        }
-
         if (current_char(parser) == ')') {
             parser->pos++;
             return SQL_SUCCESS;
+        }
+
+        if (current_char(parser) == ',') {
+            parser->pos++;
+            skip_whitespace(parser);
+            if (current_char(parser) == ')') {
+                sql_error_set(err,
+                              SQL_ERR_PARSE,
+                              parser->pos,
+                              "Trailing comma is not allowed in VALUES list");
+                return SQL_FAILURE;
+            }
+
+            continue;
         }
 
         sql_error_set(err, SQL_ERR_PARSE, parser->pos, "Expected ',' or ')' in VALUES list");

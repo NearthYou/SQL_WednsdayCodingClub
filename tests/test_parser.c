@@ -108,6 +108,19 @@ static int test_fail_unterminated_string(void) {
     return 0;
 }
 
+static int test_fail_trailing_comma_in_values(void) {
+    const char *sql = "INSERT INTO users VALUES (1, 'alice',);";
+    Statement stmt;
+    SqlError err;
+
+    sql_error_clear(&err);
+    statement_init(&stmt);
+    CHECK(parse_sql(sql, &stmt, &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_PARSE);
+    statement_free(&stmt);
+    return 0;
+}
+
 static int test_fail_multiple_statements(void) {
     const char *sql = "SELECT * FROM users; SELECT * FROM users;";
     Statement stmt;
@@ -145,6 +158,7 @@ int main(void) {
         { "fail_missing_semicolon", test_fail_missing_semicolon },
         { "fail_column_list", test_fail_column_list },
         { "fail_unterminated_string", test_fail_unterminated_string },
+        { "fail_trailing_comma_in_values", test_fail_trailing_comma_in_values },
         { "fail_multiple_statements", test_fail_multiple_statements },
         { "fail_where_clause", test_fail_where_clause }
     };
