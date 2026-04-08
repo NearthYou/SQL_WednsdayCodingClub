@@ -8,9 +8,6 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#define SIZE_T_FMT "%Iu"
-#else
-#define SIZE_T_FMT "%zu"
 #endif
 
 /* SQL 파일 전체를 메모리에 올려 parser가 한 번에 읽을 수 있게 한다. */
@@ -69,7 +66,7 @@ int main(int argc, char **argv) {
     const char *sql_path;
     const char *data_dir;
     char *sql_text;
-    Statement stmt;
+    SqlScript script;
     SqlError err;
 
 #ifdef _WIN32
@@ -92,27 +89,27 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    statement_init(&stmt);
-    if (parse_sql(sql_text, &stmt, &err) != SQL_SUCCESS) {
-        fprintf(stderr, "Parse error [%s] at position " SIZE_T_FMT ": %s\n",
+    sql_script_init(&script);
+    if (parse_sql_script(sql_text, &script, &err) != SQL_SUCCESS) {
+        fprintf(stderr, "Parse error [%s] at position %lu: %s\n",
                 sql_error_code_name(err.code),
-                err.position,
+                (unsigned long) err.position,
                 err.message);
-        statement_free(&stmt);
+        sql_script_free(&script);
         free(sql_text);
         return EXIT_FAILURE;
     }
 
-    if (execute_statement(&stmt, data_dir, stdout, &err) != SQL_SUCCESS) {
+    if (execute_script(&script, data_dir, stdout, &err) != SQL_SUCCESS) {
         fprintf(stderr, "Execution error [%s]: %s\n",
                 sql_error_code_name(err.code),
                 err.message);
-        statement_free(&stmt);
+        sql_script_free(&script);
         free(sql_text);
         return EXIT_FAILURE;
     }
 
-    statement_free(&stmt);
+    sql_script_free(&script);
     free(sql_text);
     return EXIT_SUCCESS;
 }

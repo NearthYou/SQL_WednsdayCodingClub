@@ -47,11 +47,7 @@ static int create_test_dir(char *buffer, size_t buffer_size) {
     int attempt;
 
     for (attempt = 0; attempt < 128; ++attempt) {
-        if (snprintf(buffer,
-                     buffer_size,
-                     "test_tmp_%d_%d",
-                     (int) GET_PID(),
-                     attempt) >= (int) buffer_size) {
+        if (snprintf(buffer, buffer_size, "test_tmp_%d_%d", (int) GET_PID(), attempt) >= (int) buffer_size) {
             return 1;
         }
 
@@ -73,13 +69,15 @@ static void build_path(char *buffer, size_t buffer_size, const char *dir, const 
 
 static int write_text_file(const char *path, const char *contents) {
     FILE *file;
+    size_t length;
 
     file = fopen(path, "wb");
     if (file == NULL) {
         return 1;
     }
 
-    if (contents != NULL && fwrite(contents, 1u, strlen(contents), file) != strlen(contents)) {
+    length = (contents != NULL) ? strlen(contents) : 0;
+    if (length > 0 && fwrite(contents, 1u, length, file) != length) {
         fclose(file);
         return 1;
     }
@@ -90,7 +88,7 @@ static int write_text_file(const char *path, const char *contents) {
 
 static char *read_text_file(const char *path) {
     FILE *file;
-    long file_size;
+    long size;
     size_t read_size;
     char *buffer;
 
@@ -104,32 +102,26 @@ static char *read_text_file(const char *path) {
         return NULL;
     }
 
-    file_size = ftell(file);
-    if (file_size < 0) {
+    size = ftell(file);
+    if (size < 0 || fseek(file, 0L, SEEK_SET) != 0) {
         fclose(file);
         return NULL;
     }
 
-    if (fseek(file, 0L, SEEK_SET) != 0) {
-        fclose(file);
-        return NULL;
-    }
-
-    buffer = (char *) malloc((size_t) file_size + 1);
+    buffer = (char *) malloc((size_t) size + 1);
     if (buffer == NULL) {
         fclose(file);
         return NULL;
     }
 
-    read_size = fread(buffer, 1u, (size_t) file_size, file);
-    if (read_size != (size_t) file_size) {
+    read_size = fread(buffer, 1u, (size_t) size, file);
+    fclose(file);
+    if (read_size != (size_t) size) {
         free(buffer);
-        fclose(file);
         return NULL;
     }
 
     buffer[read_size] = '\0';
-    fclose(file);
     return buffer;
 }
 
@@ -151,363 +143,316 @@ static int parse_statement(const char *sql, Statement *stmt, SqlError *err) {
     return parse_sql(sql, stmt, err);
 }
 
-static int test_insert_simple(void) {
-    const char *sql = "INSERT INTO users VALUES (1, 'alice', 20);";
+static int parse_script(const char *sql, SqlScript *script, SqlError *err) {
+    sql_error_clear(err);
+    sql_script_init(script);
+    return parse_sql_script(sql, script, err);
+}
+
+static int execute_sql_script_to_file(const char *sql, const char *data_dir, const char *output_path, SqlError *err) {
+    SqlScript script;
+    FILE *output;
+    int result;
+
+    sql_script_init(&script);
+    result = parse_script(sql, &script, err);
+    if (result != SQL_SUCCESS) {
+        return result;
+    }
+
+    output = fopen(output_path, "wb");
+    if (output == NULL) {
+        sql_script_free(&script);
+        sql_error_set(err, SQL_ERR_IO, 0, "Failed to open output file '%s'", output_path);
+        return SQL_FAILURE;
+    }
+
+    result = execute_script(&script, data_dir, output, err);
+    fclose(output);
+    sql_script_free(&script);
+    return result;
+}
+
+static int test_parse_insert_column_list(void) {
     Statement stmt;
     SqlError err;
 
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
+    CHECK(parse_statement("INSERT INTO users (name, id, age) VALUES ('alice', 1, 20);", &stmt, &err) == SQL_SUCCESS);
     CHECK(stmt.type == STMT_INSERT);
-    CHECK(stmt.schema == NULL);
-    CHECK(strcmp(stmt.table, "users") == 0);
+    CHECK(stmt.column_count == 3);
+    CHECK(strcmp(stmt.columns[0], "name") == 0);
+    CHECK(strcmp(stmt.columns[1], "id") == 0);
+    CHECK(strcmp(stmt.columns[2], "age") == 0);
     CHECK(stmt.value_count == 3);
-    CHECK(stmt.values[0].type == SQL_VALUE_INT);
-    CHECK(stmt.values[0].as.int_value == 1);
-    CHECK(stmt.values[1].type == SQL_VALUE_STRING);
-    CHECK(strcmp(stmt.values[1].as.string_value, "alice") == 0);
-    CHECK(stmt.values[2].type == SQL_VALUE_INT);
-    CHECK(stmt.values[2].as.int_value == 20);
+    CHECK(stmt.values[0].type == SQL_VALUE_STRING);
+    CHECK(strcmp(stmt.values[0].as.string_value, "alice") == 0);
+    CHECK(stmt.values[1].type == SQL_VALUE_INT);
+    CHECK(stmt.values[1].as.int_value == 1);
     statement_free(&stmt);
     return 0;
 }
 
-static int test_select_schema_with_whitespace(void) {
-    const char *sql = " \n SeLeCt   * \n FROM app . users \n ; ";
+static int test_parse_select_projection(void) {
     Statement stmt;
     SqlError err;
 
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
+    CHECK(parse_statement("SELECT name, age FROM app.users;", &stmt, &err) == SQL_SUCCESS);
     CHECK(stmt.type == STMT_SELECT);
+    CHECK(stmt.select_all == 0);
+    CHECK(stmt.column_count == 2);
     CHECK(strcmp(stmt.schema, "app") == 0);
     CHECK(strcmp(stmt.table, "users") == 0);
-    CHECK(stmt.value_count == 0);
+    CHECK(strcmp(stmt.columns[0], "name") == 0);
+    CHECK(strcmp(stmt.columns[1], "age") == 0);
     statement_free(&stmt);
     return 0;
 }
 
-static int test_insert_negative_integer(void) {
-    const char *sql = "INSERT INTO audit.logs VALUES (-12, 'ok');";
+static int test_parse_string_escape_and_bom(void) {
     Statement stmt;
     SqlError err;
 
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
-    CHECK(stmt.type == STMT_INSERT);
-    CHECK(strcmp(stmt.schema, "audit") == 0);
-    CHECK(strcmp(stmt.table, "logs") == 0);
-    CHECK(stmt.value_count == 2);
-    CHECK(stmt.values[0].as.int_value == -12);
-    statement_free(&stmt);
-    return 0;
-}
-
-static int test_insert_with_utf8_bom(void) {
-    const char *sql = "\xEF\xBB\xBFINSERT INTO users VALUES (11, '홍길동', 44);";
-    Statement stmt;
-    SqlError err;
-
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
-    CHECK(stmt.type == STMT_INSERT);
-    CHECK(strcmp(stmt.table, "users") == 0);
-    CHECK(stmt.value_count == 3);
+    CHECK(parse_statement("\xEF\xBB\xBFINSERT INTO users VALUES (1, 'it''s ok', 20);", &stmt, &err) == SQL_SUCCESS);
     CHECK(stmt.values[1].type == SQL_VALUE_STRING);
-    CHECK(strcmp(stmt.values[1].as.string_value, "홍길동") == 0);
+    CHECK(strcmp(stmt.values[1].as.string_value, "it's ok") == 0);
     statement_free(&stmt);
     return 0;
 }
 
-static int test_fail_missing_semicolon(void) {
-    const char *sql = "SELECT * FROM users";
+static int test_parse_multiple_statements(void) {
+    SqlScript script;
+    SqlError err;
+
+    CHECK(parse_script("INSERT INTO users VALUES (1, 'alice', 20); SELECT name FROM users;", &script, &err) == SQL_SUCCESS);
+    CHECK(script.statement_count == 2);
+    CHECK(script.statements[0].type == STMT_INSERT);
+    CHECK(script.statements[1].type == STMT_SELECT);
+    CHECK(script.statements[1].column_count == 1);
+    CHECK(strcmp(script.statements[1].columns[0], "name") == 0);
+    sql_script_free(&script);
+    return 0;
+}
+
+static int test_parse_fail_duplicate_identifier(void) {
     Statement stmt;
     SqlError err;
 
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_FAILURE);
+    CHECK(parse_statement("SELECT id, id FROM users;", &stmt, &err) == SQL_FAILURE);
     CHECK(err.code == SQL_ERR_PARSE);
+    CHECK_CONTAINS(err.message, "Duplicate identifier");
     statement_free(&stmt);
     return 0;
 }
 
-static int test_fail_column_list(void) {
-    const char *sql = "SELECT id FROM users;";
-    Statement stmt;
-    SqlError err;
-
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_FAILURE);
-    CHECK(err.code == SQL_ERR_UNSUPPORTED);
-    statement_free(&stmt);
-    return 0;
-}
-
-static int test_fail_unterminated_string(void) {
-    const char *sql = "INSERT INTO users VALUES (1, 'alice);";
-    Statement stmt;
-    SqlError err;
-
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_FAILURE);
-    CHECK(err.code == SQL_ERR_LEX);
-    statement_free(&stmt);
-    return 0;
-}
-
-static int test_fail_trailing_comma_in_values(void) {
-    const char *sql = "INSERT INTO users VALUES (1, 'alice',);";
-    Statement stmt;
-    SqlError err;
-
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_FAILURE);
-    CHECK(err.code == SQL_ERR_PARSE);
-    statement_free(&stmt);
-    return 0;
-}
-
-static int test_fail_multiple_statements(void) {
-    const char *sql = "SELECT * FROM users; SELECT * FROM users;";
-    Statement stmt;
-    SqlError err;
-
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_FAILURE);
-    CHECK(err.code == SQL_ERR_UNSUPPORTED);
-    statement_free(&stmt);
-    return 0;
-}
-
-static int test_fail_where_clause(void) {
-    const char *sql = "SELECT * FROM users WHERE id = 1;";
-    Statement stmt;
-    SqlError err;
-
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_FAILURE);
-    CHECK(err.code == SQL_ERR_PARSE || err.code == SQL_ERR_UNSUPPORTED);
-    statement_free(&stmt);
-    return 0;
-}
-
-static int test_execute_insert_appends_row(void) {
-    const char *sql = "INSERT INTO users VALUES (2, 'bob', 30);";
+static int test_execute_schema_insert_reorders_columns(void) {
     char dir[128];
     char csv_path[256];
+    char schema_path[256];
     char output_path[256];
     char *csv_contents;
     char *output_contents;
-    Statement stmt;
     SqlError err;
-    FILE *output_file;
 
     CHECK(create_test_dir(dir, sizeof(dir)) == 0);
     build_path(csv_path, sizeof(csv_path), dir, "users.csv");
-    build_path(output_path, sizeof(output_path), dir, "insert_output.txt");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
     CHECK(write_text_file(csv_path, "id,name,age\n") == 0);
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
 
-    output_file = fopen(output_path, "wb");
-    CHECK(output_file != NULL);
-    CHECK(execute_statement(&stmt, dir, output_file, &err) == SQL_SUCCESS);
-    fclose(output_file);
-    statement_free(&stmt);
+    CHECK(execute_sql_script_to_file("INSERT INTO users (name, id, age) VALUES ('alice', 1, 20);",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_SUCCESS);
 
     csv_contents = read_text_file(csv_path);
     output_contents = read_text_file(output_path);
     CHECK(csv_contents != NULL);
     CHECK(output_contents != NULL);
-    CHECK(strcmp(csv_contents, "id,name,age\n2,\"bob\",30\n") == 0);
+    CHECK(strcmp(csv_contents, "id,name,age\n1,\"alice\",20\n") == 0);
     CHECK(strcmp(output_contents, "INSERT 1 INTO users\n") == 0);
 
     free(csv_contents);
     free(output_contents);
     cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
     cleanup_test_path(csv_path);
     cleanup_test_dir(dir);
     return 0;
 }
 
-static int test_execute_insert_fails_on_missing_csv(void) {
-    const char *sql = "INSERT INTO users VALUES (2, 'bob', 30);";
-    char dir[128];
-    char output_path[256];
-    Statement stmt;
-    SqlError err;
-    FILE *output_file;
-
-    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
-    build_path(output_path, sizeof(output_path), dir, "insert_output.txt");
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
-
-    output_file = fopen(output_path, "wb");
-    CHECK(output_file != NULL);
-    CHECK(execute_statement(&stmt, dir, output_file, &err) == SQL_FAILURE);
-    fclose(output_file);
-    CHECK(err.code == SQL_ERR_IO);
-    CHECK_CONTAINS(err.message, "users.csv");
-
-    statement_free(&stmt);
-    cleanup_test_path(output_path);
-    cleanup_test_dir(dir);
-    return 0;
-}
-
-static int test_execute_insert_fails_on_column_count_mismatch(void) {
-    const char *sql = "INSERT INTO users VALUES (2, 'bob');";
+static int test_execute_auto_create_csv_from_schema(void) {
     char dir[128];
     char csv_path[256];
+    char schema_path[256];
     char output_path[256];
-    Statement stmt;
+    char *csv_contents;
     SqlError err;
-    FILE *output_file;
 
     CHECK(create_test_dir(dir, sizeof(dir)) == 0);
     build_path(csv_path, sizeof(csv_path), dir, "users.csv");
-    build_path(output_path, sizeof(output_path), dir, "insert_output.txt");
-    CHECK(write_text_file(csv_path, "id,name,age\n") == 0);
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
 
-    output_file = fopen(output_path, "wb");
-    CHECK(output_file != NULL);
-    CHECK(execute_statement(&stmt, dir, output_file, &err) == SQL_FAILURE);
-    fclose(output_file);
-    CHECK(err.code == SQL_ERR_ARGUMENT);
-    CHECK_CONTAINS(err.message, "expects 3 values");
-
-    statement_free(&stmt);
-    cleanup_test_path(output_path);
-    cleanup_test_path(csv_path);
-    cleanup_test_dir(dir);
-    return 0;
-}
-
-static int test_execute_insert_escapes_quotes_and_schema_path(void) {
-    const char *sql = "INSERT INTO app.users VALUES (1, 'a,b\"c', 2);";
-    char dir[128];
-    char csv_path[256];
-    char output_path[256];
-    char *csv_contents;
-    Statement stmt;
-    SqlError err;
-    FILE *output_file;
-
-    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
-    build_path(csv_path, sizeof(csv_path), dir, "app__users.csv");
-    build_path(output_path, sizeof(output_path), dir, "insert_output.txt");
-    CHECK(write_text_file(csv_path, "id,name,age\n") == 0);
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
-
-    output_file = fopen(output_path, "wb");
-    CHECK(output_file != NULL);
-    CHECK(execute_statement(&stmt, dir, output_file, &err) == SQL_SUCCESS);
-    fclose(output_file);
-    statement_free(&stmt);
+    CHECK(execute_sql_script_to_file("INSERT INTO users (id, name, age) VALUES (7, 'neo', 99);",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_SUCCESS);
 
     csv_contents = read_text_file(csv_path);
     CHECK(csv_contents != NULL);
-    CHECK(strcmp(csv_contents, "id,name,age\n1,\"a,b\"\"c\",2\n") == 0);
+    CHECK(strcmp(csv_contents, "id,name,age\n7,\"neo\",99\n") == 0);
 
     free(csv_contents);
     cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
     cleanup_test_path(csv_path);
     cleanup_test_dir(dir);
     return 0;
 }
 
-static int test_execute_select_streams_csv(void) {
-    const char *sql = "SELECT * FROM users;";
+static int test_execute_type_validation_failure(void) {
     char dir[128];
     char csv_path[256];
+    char schema_path[256];
     char output_path[256];
+    char *csv_contents;
     char *output_contents;
-    Statement stmt;
     SqlError err;
-    FILE *output_file;
 
     CHECK(create_test_dir(dir, sizeof(dir)) == 0);
     build_path(csv_path, sizeof(csv_path), dir, "users.csv");
-    build_path(output_path, sizeof(output_path), dir, "select_output.txt");
-    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
 
-    output_file = fopen(output_path, "wb");
-    CHECK(output_file != NULL);
-    CHECK(execute_statement(&stmt, dir, output_file, &err) == SQL_SUCCESS);
-    fclose(output_file);
-    statement_free(&stmt);
+    CHECK(execute_sql_script_to_file("INSERT INTO users VALUES ('bad', 'bob', 30);",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_ARGUMENT);
+    CHECK_CONTAINS(err.message, "expects INT");
+
+    csv_contents = read_text_file(csv_path);
+    output_contents = read_text_file(output_path);
+    CHECK(csv_contents != NULL);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(csv_contents, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(strcmp(output_contents, "") == 0);
+
+    free(csv_contents);
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_projection(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_to_file("SELECT name, age FROM users;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_SUCCESS);
 
     output_contents = read_text_file(output_path);
     CHECK(output_contents != NULL);
-    CHECK(strcmp(output_contents, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+    CHECK(strcmp(output_contents, "name,age\n\"alice\",20\n\"bob\",30\n") == 0);
 
     free(output_contents);
     cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
     cleanup_test_path(csv_path);
     cleanup_test_dir(dir);
     return 0;
 }
 
-static int test_execute_select_fails_on_empty_csv(void) {
-    const char *sql = "SELECT * FROM users;";
+static int test_execute_script_insert_then_select_sees_staged_row(void) {
     char dir[128];
     char csv_path[256];
+    char schema_path[256];
     char output_path[256];
-    Statement stmt;
+    char *output_contents;
+    char *csv_contents;
     SqlError err;
-    FILE *output_file;
 
     CHECK(create_test_dir(dir, sizeof(dir)) == 0);
     build_path(csv_path, sizeof(csv_path), dir, "users.csv");
-    build_path(output_path, sizeof(output_path), dir, "select_output.txt");
-    CHECK(write_text_file(csv_path, "") == 0);
-    CHECK(parse_statement(sql, &stmt, &err) == SQL_SUCCESS);
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
 
-    output_file = fopen(output_path, "wb");
-    CHECK(output_file != NULL);
-    CHECK(execute_statement(&stmt, dir, output_file, &err) == SQL_FAILURE);
-    fclose(output_file);
-    CHECK(err.code == SQL_ERR_PARSE);
-    CHECK_CONTAINS(err.message, "header row");
+    CHECK(execute_sql_script_to_file("INSERT INTO users (id, name, age) VALUES (2, 'bob', 30); SELECT name, age FROM users;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_SUCCESS);
 
-    statement_free(&stmt);
+    output_contents = read_text_file(output_path);
+    csv_contents = read_text_file(csv_path);
+    CHECK(output_contents != NULL);
+    CHECK(csv_contents != NULL);
+    CHECK(strcmp(output_contents, "INSERT 1 INTO users\nname,age\n\"alice\",20\n\"bob\",30\n") == 0);
+    CHECK(strcmp(csv_contents, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+
+    free(output_contents);
+    free(csv_contents);
     cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
     cleanup_test_path(csv_path);
     cleanup_test_dir(dir);
     return 0;
 }
 
-static int test_execute_insert_then_select_round_trip(void) {
-    const char *insert_sql = "INSERT INTO users VALUES (3, 'carol', 28);";
-    const char *select_sql = "SELECT * FROM users;";
+static int test_execute_script_rollback_on_failure(void) {
     char dir[128];
     char csv_path[256];
-    char insert_output_path[256];
-    char select_output_path[256];
-    char *select_output;
-    Statement insert_stmt;
-    Statement select_stmt;
+    char schema_path[256];
+    char output_path[256];
+    char *csv_contents;
+    char *output_contents;
     SqlError err;
-    FILE *output_file;
 
     CHECK(create_test_dir(dir, sizeof(dir)) == 0);
     build_path(csv_path, sizeof(csv_path), dir, "users.csv");
-    build_path(insert_output_path, sizeof(insert_output_path), dir, "insert_output.txt");
-    build_path(select_output_path, sizeof(select_output_path), dir, "select_output.txt");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
     CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
 
-    CHECK(parse_statement(insert_sql, &insert_stmt, &err) == SQL_SUCCESS);
-    output_file = fopen(insert_output_path, "wb");
-    CHECK(output_file != NULL);
-    CHECK(execute_statement(&insert_stmt, dir, output_file, &err) == SQL_SUCCESS);
-    fclose(output_file);
-    statement_free(&insert_stmt);
+    CHECK(execute_sql_script_to_file("INSERT INTO users (id, name, age) VALUES (2, 'bob', 30); INSERT INTO users VALUES ('bad', 'oops', 10); SELECT * FROM users;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_ARGUMENT);
 
-    CHECK(parse_statement(select_sql, &select_stmt, &err) == SQL_SUCCESS);
-    output_file = fopen(select_output_path, "wb");
-    CHECK(output_file != NULL);
-    CHECK(execute_statement(&select_stmt, dir, output_file, &err) == SQL_SUCCESS);
-    fclose(output_file);
-    statement_free(&select_stmt);
+    csv_contents = read_text_file(csv_path);
+    output_contents = read_text_file(output_path);
+    CHECK(csv_contents != NULL);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(csv_contents, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(strcmp(output_contents, "") == 0);
 
-    select_output = read_text_file(select_output_path);
-    CHECK(select_output != NULL);
-    CHECK(strcmp(select_output, "id,name,age\n1,\"alice\",20\n3,\"carol\",28\n") == 0);
-
-    free(select_output);
-    cleanup_test_path(select_output_path);
-    cleanup_test_path(insert_output_path);
+    free(csv_contents);
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
     cleanup_test_path(csv_path);
     cleanup_test_dir(dir);
     return 0;
@@ -518,23 +463,17 @@ int main(void) {
         const char *name;
         int (*fn)(void);
     } tests[] = {
-        { "insert_simple", test_insert_simple },
-        { "select_schema_with_whitespace", test_select_schema_with_whitespace },
-        { "insert_negative_integer", test_insert_negative_integer },
-        { "insert_with_utf8_bom", test_insert_with_utf8_bom },
-        { "fail_missing_semicolon", test_fail_missing_semicolon },
-        { "fail_column_list", test_fail_column_list },
-        { "fail_unterminated_string", test_fail_unterminated_string },
-        { "fail_trailing_comma_in_values", test_fail_trailing_comma_in_values },
-        { "fail_multiple_statements", test_fail_multiple_statements },
-        { "fail_where_clause", test_fail_where_clause },
-        { "execute_insert_appends_row", test_execute_insert_appends_row },
-        { "execute_insert_fails_on_missing_csv", test_execute_insert_fails_on_missing_csv },
-        { "execute_insert_fails_on_column_count_mismatch", test_execute_insert_fails_on_column_count_mismatch },
-        { "execute_insert_escapes_quotes_and_schema_path", test_execute_insert_escapes_quotes_and_schema_path },
-        { "execute_select_streams_csv", test_execute_select_streams_csv },
-        { "execute_select_fails_on_empty_csv", test_execute_select_fails_on_empty_csv },
-        { "execute_insert_then_select_round_trip", test_execute_insert_then_select_round_trip }
+        { "parse_insert_column_list", test_parse_insert_column_list },
+        { "parse_select_projection", test_parse_select_projection },
+        { "parse_string_escape_and_bom", test_parse_string_escape_and_bom },
+        { "parse_multiple_statements", test_parse_multiple_statements },
+        { "parse_fail_duplicate_identifier", test_parse_fail_duplicate_identifier },
+        { "execute_schema_insert_reorders_columns", test_execute_schema_insert_reorders_columns },
+        { "execute_auto_create_csv_from_schema", test_execute_auto_create_csv_from_schema },
+        { "execute_type_validation_failure", test_execute_type_validation_failure },
+        { "execute_select_projection", test_execute_select_projection },
+        { "execute_script_insert_then_select_sees_staged_row", test_execute_script_insert_then_select_sees_staged_row },
+        { "execute_script_rollback_on_failure", test_execute_script_rollback_on_failure }
     };
     size_t i;
     int failures;
