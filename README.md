@@ -30,3 +30,12 @@ Mini SQL processor draft for Week 6.
 - The parser stays small and easy to trace for learning.
 - Executor and storage are split early so Phase 2 work stays isolated.
 - `sql_processor.h` remains as a simple entry point, while module headers make responsibilities explicit.
+
+## CI/CD
+
+- CI: GitHub Actions runs on push and pull request.
+  - Ubuntu: `gcc`, `clang`
+  - Windows: MinGW via MSYS2
+  - Each job builds the project, runs parser tests, and executes the sample `INSERT` / `SELECT` queries.
+- CD: pushing a tag like `v0.1.0` builds Linux and Windows release bundles and publishes them as GitHub Release assets.
+- Manual release-asset verification is also available through `workflow_dispatch` on the `Release` workflow.

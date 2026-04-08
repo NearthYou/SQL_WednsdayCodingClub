@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-assets:
+    name: Build Release Asset (${{ matrix.target }})
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs_on: ubuntu-latest
+          - target: windows-x86_64
+            runs_on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=manual-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make gcc tar
+
+      - name: Build on Linux
+        if: runner.os == 'Linux'
+        run: make clean all
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          asset="sql-processor-${{ steps.version.outputs.value }}-linux-x86_64"
+          package_dir="${asset}"
+          mkdir -p "${package_dir}"
+          cp sql_processor "${package_dir}/"
+          cp README.md "${package_dir}/"
+          cp -R queries "${package_dir}/"
+          cp -R data "${package_dir}/"
+          tar -czf "${asset}.tar.gz" "${package_dir}"
+
+      - name: Upload Linux artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-processor-${{ steps.version.outputs.value }}-linux-x86_64
+          path: sql-processor-${{ steps.version.outputs.value }}-linux-x86_64.tar.gz
+
+      - name: Set up MSYS2 toolchain
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            mingw-w64-x86_64-gcc
+
+      - name: Build on Windows
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: make clean all
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $asset = "sql-processor-${{ steps.version.outputs.value }}-windows-x86_64"
+          $packageDir = Join-Path $PWD $asset
+          New-Item -ItemType Directory -Force $packageDir | Out-Null
+          Copy-Item "$PWD\\sql_processor.exe" -Destination $packageDir
+          Copy-Item "$PWD\\README.md" -Destination $packageDir
+          Copy-Item "$PWD\\queries" -Destination $packageDir -Recurse
+          Copy-Item "$PWD\\data" -Destination $packageDir -Recurse
+          Compress-Archive -Path "$packageDir\\*" -DestinationPath "$PWD\\$asset.zip" -Force
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-processor-${{ steps.version.outputs.value }}-windows-x86_64
+          path: sql-processor-${{ steps.version.outputs.value }}-windows-x86_64.zip
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-release-assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          mapfile -t files < <(find dist -type f | sort)
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "No release assets were downloaded."
+            exit 1
+          fi
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${files[@]}" --clobber
+          else
+            gh release create "${tag}" "${files[@]}" --title "${tag}" --generate-notes
+          fi
