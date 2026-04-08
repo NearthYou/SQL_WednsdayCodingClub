@@ -87,8 +87,18 @@ static int append_char_to_buffer(char **buffer,
     size_t new_capacity;
 
     if (*length + 1 >= *capacity) {
+        if (*capacity > SIZE_MAX / 2) {
+            sql_error_set(err, SQL_ERR_MEMORY, position, "Out of memory while reading %s", context);
+            return SQL_FAILURE;
+        }
+
         new_capacity = (*capacity == 0) ? 16 : (*capacity * 2);
         if (new_capacity <= *length + 1) {
+            if (*length > SIZE_MAX - 2) {
+                sql_error_set(err, SQL_ERR_MEMORY, position, "Out of memory while reading %s", context);
+                return SQL_FAILURE;
+            }
+
             new_capacity = *length + 2;
         }
 

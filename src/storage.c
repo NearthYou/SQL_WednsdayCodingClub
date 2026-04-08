@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -134,8 +135,18 @@ static int append_char(char **buffer,
     size_t new_capacity;
 
     if (*length + 1 >= *capacity) {
+        if (*capacity > SIZE_MAX / 2) {
+            sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while handling %s for '%s'", context, path);
+            return SQL_FAILURE;
+        }
+
         new_capacity = (*capacity == 0) ? 32 : (*capacity * 2);
         if (new_capacity <= *length + 1) {
+            if (*length > SIZE_MAX - 2) {
+                sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while handling %s for '%s'", context, path);
+                return SQL_FAILURE;
+            }
+
             new_capacity = *length + 2;
         }
 

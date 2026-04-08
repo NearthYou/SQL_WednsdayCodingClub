@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -75,6 +76,8 @@ static int append_unique_string(StringList *list, const char *text, SqlError *er
     char **expanded;
     char *copy;
     size_t i;
+    size_t new_count;
+    size_t new_size;
 
     for (i = 0; i < list->count; ++i) {
         if (strcmp(list->items[i], text) == 0) {
@@ -88,7 +91,15 @@ static int append_unique_string(StringList *list, const char *text, SqlError *er
         return SQL_FAILURE;
     }
 
-    expanded = (char **) realloc(list->items, (list->count + 1) * sizeof(*expanded));
+    if (list->count >= SIZE_MAX / sizeof(*expanded)) {
+        free(copy);
+        sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while growing %s list", context);
+        return SQL_FAILURE;
+    }
+
+    new_count = list->count + 1;
+    new_size = new_count * sizeof(*expanded);
+    expanded = (char **) realloc(list->items, new_size);
     if (expanded == NULL) {
         free(copy);
         sql_error_set(err, SQL_ERR_MEMORY, 0, "Out of memory while growing %s list", context);
