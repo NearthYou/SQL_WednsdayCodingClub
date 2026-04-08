@@ -1,3 +1,5 @@
+<img width="356" height="354" alt="image" src="https://github.com/user-attachments/assets/9662a483-849c-4ff2-9bfa-8ee0feaf7d9c" />
+
 <div align="center">
 
 # SQL_WednsdayCodingClub
