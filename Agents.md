@@ -48,10 +48,10 @@
 
 ### Phase 2 - 실행기와 저장소
 
-- [ ] 저장소 모듈과 `storage_append_row` 구현
-- [ ] 실행기와 `execute_statement` 구현
-- [ ] CLI -> Parser -> Executor -> Storage 통합
-- [ ] 통합 테스트와 경계 케이스 테스트 추가
+- [x] 저장소 모듈과 `storage_append_row` 구현
+- [x] 실행기와 `execute_statement` 구현
+- [x] CLI -> Parser -> Executor -> Storage 통합
+- [x] 통합 테스트와 경계 케이스 테스트 추가
 
 ## 현재 상태 체크리스트
 
@@ -61,21 +61,22 @@
 - [x] Phase 1 구현 완료
 - [x] Phase 1 리뷰 완료
 - [x] 리뷰 후 구조 리팩터링 완료
-- [ ] 사용자 승인 후 Phase 2 시작 예정
+- [x] Phase 2 구현 완료
 
 ## 아키텍처 결정
 
-- 지금은 Phase 1까지만 다룸. 사용자가 명시적으로 승인하기 전에는 Phase 2 동작을 구현하지 않음.
 - 파서는 `strtok` 대신 수동 스캐너를 사용함.
 - AST는 힙에 할당된 문자열과 값 배열을 사용함.
 - 예측 가능한 정리를 위해 `statement_init`, `statement_free`를 제공함.
 - 에러는 `int` 반환값과 `out` / `err` 출력 파라미터 조합으로 전달함.
 - 기본 빌드 기준은 WSL/Linux `make`지만, 코드는 가능한 한 portable C11로 유지함.
 - `parse_sql`은 임시 `Statement`를 먼저 만든 뒤 성공 시에만 호출자에게 소유권을 넘김.
-- Phase 1 CLI는 파일을 읽고 파싱 결과 요약만 출력하며, 저장소 실행은 하지 않음.
+- Phase 2 CLI는 파일을 읽고 파싱한 뒤 바로 실행기 결과를 출력함.
 - MVP에서는 문자열 escape를 지원하지 않음.
 - 공개 헤더는 역할별로 나누고, `include/sql_processor.h`는 편의용 우산 헤더로 유지함.
-- Phase 2 경계는 실제 링크 구조에 드러나도록 스텁 모듈로 분리해 둠.
+- `execute_statement`는 Statement 타입에 따라 실행 경로를 분기함.
+- `storage_append_row`는 CSV 헤더 검증과 append만 담당함.
+- 문자열 값은 CSV 저장 시 항상 큰따옴표로 감싸고 내부 큰따옴표는 `""`로 escape 함.
 
 ## 컨텍스트 메모
 
@@ -85,6 +86,7 @@
 - `bash.exe`, `wsl.exe`는 권한 문제로 로컬 `make test` 검증에 바로 쓰기 어려웠음.
 - 데모 자산으로 `data/users.csv`, `queries/insert_users.sql`, `queries/select_users.sql`를 추가함.
 - Phase 1 구현 배경과 리뷰 포인트는 `PHASE1_IMPLEMENTATION_NOTES.md`에 정리함.
+- Phase 2 구현 배경과 리뷰 포인트는 `PHASE2_IMPLEMENTATION_NOTES.md`에 정리함.
 - `PHASE1_IMPLEMENTATION_NOTES.md`의 일부 라인 번호 기반 설명은 리팩터링 이전 기준일 수 있음.
 
 ## 리뷰 로그
@@ -95,3 +97,4 @@
 - `PHASE1_IMPLEMENTATION_NOTES.md`에 구현 배경과 리뷰 포인트 문서화 완료
 - 리뷰 후 헤더 역할 분리, `execute` / `storage` 스텁 모듈 추가 완료
 - 현재 PR 브랜치에는 GitHub Actions 기반 CI/CD도 추가됨
+- Phase 2 구현 완료: CSV append/select 실행, 통합 테스트, README와 Phase 2 문서 갱신

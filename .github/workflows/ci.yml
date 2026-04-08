@@ -37,14 +37,14 @@ jobs:
       - name: Build binaries
         run: make clean all CC=${{ matrix.compiler }}
 
-      - name: Run parser tests
+      - name: Run tests
         run: make test CC=${{ matrix.compiler }}
 
-      - name: Run sample INSERT query
-        run: ./sql_processor queries/insert_users.sql
-
-      - name: Run sample SELECT query
-        run: ./sql_processor queries/select_users.sql
+      - name: Run sample queries
+        run: |
+          cp -R data data_tmp
+          ./sql_processor queries/insert_users.sql data_tmp
+          ./sql_processor queries/select_users.sql data_tmp
 
   windows-build-and-test:
     name: Windows (MinGW)
@@ -69,11 +69,11 @@ jobs:
       - name: Build binaries
         run: make clean all
 
-      - name: Run parser tests
+      - name: Run tests
         run: make test
 
-      - name: Run sample INSERT query
-        run: ./sql_processor queries/insert_users.sql
-
-      - name: Run sample SELECT query
-        run: ./sql_processor queries/select_users.sql
+      - name: Run sample queries
+        run: |
+          cp -R data data_tmp
+          ./sql_processor queries/insert_users.sql data_tmp
+          ./sql_processor queries/select_users.sql data_tmp

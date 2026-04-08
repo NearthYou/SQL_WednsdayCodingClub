@@ -5,7 +5,7 @@ TARGET := sql_processor
 CORE_OBJS := src/parser.o src/statement.o src/sql_error.o
 PHASE2_STUB_OBJS := src/execute_stub.o src/storage_stub.o
 APP_OBJS := src/main.o $(CORE_OBJS) $(PHASE2_STUB_OBJS)
-TEST_OBJS := tests/test_parser.o $(CORE_OBJS)
+TEST_OBJS := tests/test_parser.o $(CORE_OBJS) $(PHASE2_STUB_OBJS)
 TEST_TARGET := test_parser
 
 .PHONY: all test clean
