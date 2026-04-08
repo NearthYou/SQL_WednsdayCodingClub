@@ -167,21 +167,3 @@ flowchart TD
 | `INSERT INTO users (name, id, age) ...` | schema 순서로 재정렬 저장 |
 | `SELECT name, age FROM users;` | projection 출력 |
 | `INSERT ...; INSERT bad ...;` | rollback |
-
----
-
-## Detail Links
-
-- [CLI_DEMO_SCENARIOS.md](./CLI_DEMO_SCENARIOS.md)
-- [PHASE3_IMPLEMENTATION_NOTES.md](./PHASE3_IMPLEMENTATION_NOTES.md)
-- [INTERVIEW_QUESTIONS.md](./INTERVIEW_QUESTIONS.md)
-
----
-
-<div align="center">
-
-## One Line
-
-### **"CSV를 읽고 쓰는 프로젝트가 아니라, SQL을 해석하고 안전하게 실행하는 구조를 직접 만든 프로젝트"**
-
-</div>
