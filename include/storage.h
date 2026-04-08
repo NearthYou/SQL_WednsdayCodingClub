@@ -2,6 +2,7 @@
 #define STORAGE_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 #include "sql_common.h"
 #include "sql_error.h"
@@ -13,6 +14,13 @@ int storage_append_row(const char *data_dir,
                        const char *table,
                        const SqlValue *values,
                        size_t value_count,
+                       SqlError *err);
+
+/* Phase 2에서 CSV 전체를 헤더 포함 그대로 출력하는 저장소 경계다. */
+int storage_select_all(const char *data_dir,
+                       const char *schema,
+                       const char *table,
+                       FILE *out,
                        SqlError *err);
 
 #endif

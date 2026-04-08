@@ -76,10 +76,10 @@ Week 6 학습용 미니 SQL Processor입니다.
   - 공통 에러 처리 함수를 구현합니다.
 - `src/main.c`
   - CLI 진입점입니다. SQL 파일을 읽고 파싱한 뒤 실행기로 넘깁니다.
-- `src/execute_stub.c`
+- `src/execute.c`
   - `INSERT` / `SELECT` 실행을 담당합니다.
-- `src/storage_stub.c`
-  - CSV 파일 경로 계산, 헤더 검증, 행 append를 담당합니다.
+- `src/storage.c`
+  - CSV 파일 경로 계산, 헤더 검증, 행 append/select를 담당합니다.
 - `tests/test_parser.c`
   - 파서 테스트와 Phase 2 통합 테스트를 함께 담고 있습니다.
 - `queries/`
@@ -138,8 +138,8 @@ make test
 1. `include/sql_types.h`
 2. `src/parser.c`
 3. `src/main.c`
-4. `src/execute_stub.c`
-5. `src/storage_stub.c`
+4. `src/execute.c`
+5. `src/storage.c`
 6. `tests/test_parser.c`
 
 이 순서로 보면 Phase 1의 파싱 구조 위에 Phase 2 실행이 어떻게 얹히는지 자연스럽게 따라갈 수 있습니다.
