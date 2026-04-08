@@ -4,13 +4,11 @@
 
 ### CSV 기반 Mini SQL Processor
 
-**Manual Parser** · **AST** · **Schema-Aware CSV** · **Staging Rollback**
-
 </div>
 
 ---
 
-## What It Is
+## 프로젝트 특징
 
 <table>
   <tr>
@@ -35,7 +33,7 @@
 
 ---
 
-## Why This Project
+## 프로젝트 구조
 
 <table>
   <tr>
@@ -73,7 +71,7 @@ flowchart LR
 
 ---
 
-## Execution Flow
+## Flow
 
 ```mermaid
 flowchart TD
@@ -93,7 +91,7 @@ flowchart TD
 
 ---
 
-## Design Choices
+## 의사 결정
 
 | Decision | Choice | Reason |
 |---|---|---|
@@ -105,7 +103,7 @@ flowchart TD
 
 ---
 
-## Core Capabilities
+## 핵심 기능
 
 <table>
   <tr>
@@ -132,9 +130,9 @@ flowchart TD
 
 ---
 
-## Strengths vs Limits
+## 강점 및 한계
 
-| Strengths | Limits |
+| 강점 | 한계 |
 |---|---|
 | SQL 처리 흐름이 코드로 선명하다 | 실제 DB 엔진은 아니다 |
 | AST 기반으로 구조가 명확하다 | `WHERE`, `JOIN`, `UPDATE` 미지원 |
@@ -143,7 +141,7 @@ flowchart TD
 
 ---
 
-## Demo Focus
+## 데모
 
 <table>
   <tr>
@@ -167,21 +165,3 @@ flowchart TD
 | `INSERT INTO users (name, id, age) ...` | schema 순서로 재정렬 저장 |
 | `SELECT name, age FROM users;` | projection 출력 |
 | `INSERT ...; INSERT bad ...;` | rollback |
-
----
-
-## Detail Links
-
-- [CLI_DEMO_SCENARIOS.md](./CLI_DEMO_SCENARIOS.md)
-- [PHASE3_IMPLEMENTATION_NOTES.md](./PHASE3_IMPLEMENTATION_NOTES.md)
-- [INTERVIEW_QUESTIONS.md](./INTERVIEW_QUESTIONS.md)
-
----
-
-<div align="center">
-
-## One Line
-
-### **"CSV를 읽고 쓰는 프로젝트가 아니라, SQL을 해석하고 안전하게 실행하는 구조를 직접 만든 프로젝트"**
-
-</div>
