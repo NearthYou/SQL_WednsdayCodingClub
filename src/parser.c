@@ -629,6 +629,24 @@ static int parse_select_columns(Parser *parser, Statement *stmt, SqlError *err) 
     return parse_identifier_sequence(parser, &stmt->columns, &stmt->column_count, err);
 }
 
+static int parse_select_where(Parser *parser, Statement *stmt, SqlError *err) {
+    skip_whitespace(parser);
+    if (!match_keyword(parser, "WHERE")) {
+        return SQL_SUCCESS;
+    }
+
+    stmt->has_where = 1;
+    if (parse_identifier(parser, &stmt->where_column, err) != SQL_SUCCESS) {
+        return SQL_FAILURE;
+    }
+
+    if (consume_char(parser, '=', err) != SQL_SUCCESS) {
+        return SQL_FAILURE;
+    }
+
+    return parse_value(parser, &stmt->where_value, err);
+}
+
 /* SELECT는 * 또는 명시적 컬럼 목록을 읽고 FROM 대상을 파싱한다. */
 static int parse_select(Parser *parser, Statement *stmt, SqlError *err) {
     stmt->type = STMT_SELECT;
@@ -641,7 +659,11 @@ static int parse_select(Parser *parser, Statement *stmt, SqlError *err) {
         return SQL_FAILURE;
     }
 
-    return parse_qualified_name(parser, stmt, err);
+    if (parse_qualified_name(parser, stmt, err) != SQL_SUCCESS) {
+        return SQL_FAILURE;
+    }
+
+    return parse_select_where(parser, stmt, err);
 }
 
 static int parse_statement_core(Parser *parser, Statement *stmt, SqlError *err) {

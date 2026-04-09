@@ -450,6 +450,31 @@ static int test_parse_select_projection(void) {
     return 0;
 }
 
+static int test_parse_select_where(void) {
+    Statement stmt;
+    SqlError err;
+
+    CHECK(parse_statement("SELECT * FROM users WHERE id = 2;", &stmt, &err) == SQL_SUCCESS);
+    CHECK(stmt.type == STMT_SELECT);
+    CHECK(stmt.select_all == 1);
+    CHECK(stmt.has_where == 1);
+    CHECK(strcmp(stmt.where_column, "id") == 0);
+    CHECK(stmt.where_value.type == SQL_VALUE_INT);
+    CHECK(stmt.where_value.as.int_value == 2);
+    statement_free(&stmt);
+
+    CHECK(parse_statement("SELECT name FROM users WHERE name = 'alice';", &stmt, &err) == SQL_SUCCESS);
+    CHECK(stmt.type == STMT_SELECT);
+    CHECK(stmt.select_all == 0);
+    CHECK(stmt.column_count == 1);
+    CHECK(stmt.has_where == 1);
+    CHECK(strcmp(stmt.where_column, "name") == 0);
+    CHECK(stmt.where_value.type == SQL_VALUE_STRING);
+    CHECK(strcmp(stmt.where_value.as.string_value, "alice") == 0);
+    statement_free(&stmt);
+    return 0;
+}
+
 static int test_parse_string_escape_and_bom(void) {
     Statement stmt;
     SqlError err;
@@ -482,6 +507,27 @@ static int test_parse_fail_duplicate_identifier(void) {
     CHECK(parse_statement("SELECT id, id FROM users;", &stmt, &err) == SQL_FAILURE);
     CHECK(err.code == SQL_ERR_PARSE);
     CHECK_CONTAINS(err.message, "Duplicate identifier");
+    statement_free(&stmt);
+    return 0;
+}
+
+static int test_parse_fail_select_where_shapes(void) {
+    Statement stmt;
+    SqlError err;
+
+    CHECK(parse_statement("SELECT * FROM users WHERE = 2;", &stmt, &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_LEX);
+    CHECK_CONTAINS(err.message, "Expected identifier");
+    statement_free(&stmt);
+
+    CHECK(parse_statement("SELECT * FROM users WHERE id 2;", &stmt, &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_PARSE);
+    CHECK_CONTAINS(err.message, "Expected '='");
+    statement_free(&stmt);
+
+    CHECK(parse_statement("SELECT * FROM users WHERE id = ;", &stmt, &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_LEX);
+    CHECK_CONTAINS(err.message, "Expected integer or string literal");
     statement_free(&stmt);
     return 0;
 }
@@ -625,6 +671,107 @@ static int test_execute_select_projection(void) {
     return 0;
 }
 
+static int test_execute_select_all_where_raw(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_to_file("SELECT * FROM users WHERE id = 2;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents, "id,name,age\n2,\"bob\",30\n") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_projection_where_raw(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_to_file("SELECT name, age FROM users WHERE name = 'bob';",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents, "name,age\n\"bob\",30\n") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_script_insert_then_select_where_sees_staged_row(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    char *csv_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_to_file("INSERT INTO users (id, name, age) VALUES (2, 'bob', 30); SELECT name, age FROM users WHERE id = 2;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    csv_contents = read_text_file(csv_path);
+    CHECK(output_contents != NULL);
+    CHECK(csv_contents != NULL);
+    CHECK(strcmp(output_contents, "INSERT 1 INTO users\nname,age\n\"bob\",30\n") == 0);
+    CHECK(strcmp(csv_contents, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+
+    free(output_contents);
+    free(csv_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
 static int test_execute_script_insert_then_select_sees_staged_row(void) {
     char dir[128];
     char csv_path[256];
@@ -662,6 +809,44 @@ static int test_execute_script_insert_then_select_sees_staged_row(void) {
     return 0;
 }
 
+static int test_execute_select_projection_where_pretty_ascii(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_formatted_to_file("SELECT name, age FROM users WHERE name = 'bob';",
+                                               dir,
+                                               EXECUTE_OUTPUT_PRETTY_ASCII,
+                                               output_path,
+                                               &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents,
+                 "+------+-----+\n"
+                 "| name | age |\n"
+                 "+------+-----+\n"
+                 "| bob  |  30 |\n"
+                 "+------+-----+\n") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
 static int test_execute_select_all_pretty_ascii(void) {
     char dir[128];
     char csv_path[256];
@@ -692,6 +877,43 @@ static int test_execute_select_all_pretty_ascii(void) {
                  "|  1 | alice |  20 |\n"
                  "|  2 | bob   |  30 |\n"
                  "+----+-------+-----+\n") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_where_pretty_empty_result(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n2,\"bob\",30\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_formatted_to_file("SELECT * FROM users WHERE id = 9;",
+                                               dir,
+                                               EXECUTE_OUTPUT_PRETTY_ASCII,
+                                               output_path,
+                                               &err) == SQL_SUCCESS);
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents,
+                 "+----+------+-----+\n"
+                 "| id | name | age |\n"
+                 "+----+------+-----+\n"
+                 "+----+------+-----+\n") == 0);
 
     free(output_contents);
     cleanup_test_path(output_path);
@@ -935,6 +1157,177 @@ static int test_execute_script_rollback_on_failure(void) {
                                      output_path,
                                      &err) == SQL_FAILURE);
     CHECK(err.code == SQL_ERR_ARGUMENT);
+
+    csv_contents = read_text_file(csv_path);
+    output_contents = read_text_file(output_path);
+    CHECK(csv_contents != NULL);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(csv_contents, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(strcmp(output_contents, "") == 0);
+
+    free(csv_contents);
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_where_requires_schema(void) {
+    char dir[128];
+    char csv_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+
+    CHECK(execute_sql_script_to_file("SELECT * FROM users WHERE id = 1;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_UNSUPPORTED);
+    CHECK_CONTAINS(err.message, "WHERE requires a schema file");
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents, "") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_where_rejects_unknown_column(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_to_file("SELECT * FROM users WHERE missing = 1;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_ARGUMENT);
+    CHECK_CONTAINS(err.message, "Unknown WHERE column");
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents, "") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_where_rejects_type_mismatch(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_to_file("SELECT * FROM users WHERE age = '30';",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_ARGUMENT);
+    CHECK_CONTAINS(err.message, "expects INT literal");
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents, "") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_select_where_rejects_invalid_int_cell(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\nbad,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_to_file("SELECT name FROM users WHERE id = 2;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_PARSE);
+    CHECK_CONTAINS(err.message, "invalid INT value");
+
+    output_contents = read_text_file(output_path);
+    CHECK(output_contents != NULL);
+    CHECK(strcmp(output_contents, "") == 0);
+
+    free(output_contents);
+    cleanup_test_path(output_path);
+    cleanup_test_path(schema_path);
+    cleanup_test_path(csv_path);
+    cleanup_test_dir(dir);
+    return 0;
+}
+
+static int test_execute_script_rollback_on_where_failure(void) {
+    char dir[128];
+    char csv_path[256];
+    char schema_path[256];
+    char output_path[256];
+    char *csv_contents;
+    char *output_contents;
+    SqlError err;
+
+    CHECK(create_test_dir(dir, sizeof(dir)) == 0);
+    build_path(csv_path, sizeof(csv_path), dir, "users.csv");
+    build_path(schema_path, sizeof(schema_path), dir, "users.schema.csv");
+    build_path(output_path, sizeof(output_path), dir, "output.txt");
+    CHECK(write_text_file(csv_path, "id,name,age\n1,\"alice\",20\n") == 0);
+    CHECK(write_text_file(schema_path, "name,type\nid,INT\nname,STRING\nage,INT\n") == 0);
+
+    CHECK(execute_sql_script_to_file("INSERT INTO users (id, name, age) VALUES (2, 'bob', 30); SELECT * FROM users WHERE missing = 1;",
+                                     dir,
+                                     output_path,
+                                     &err) == SQL_FAILURE);
+    CHECK(err.code == SQL_ERR_ARGUMENT);
+    CHECK_CONTAINS(err.message, "Unknown WHERE column");
 
     csv_contents = read_text_file(csv_path);
     output_contents = read_text_file(output_path);
@@ -1319,20 +1712,32 @@ int main(void) {
     } tests[] = {
         { "parse_insert_column_list", test_parse_insert_column_list },
         { "parse_select_projection", test_parse_select_projection },
+        { "parse_select_where", test_parse_select_where },
         { "parse_string_escape_and_bom", test_parse_string_escape_and_bom },
         { "parse_multiple_statements", test_parse_multiple_statements },
         { "parse_fail_duplicate_identifier", test_parse_fail_duplicate_identifier },
+        { "parse_fail_select_where_shapes", test_parse_fail_select_where_shapes },
         { "execute_schema_insert_reorders_columns", test_execute_schema_insert_reorders_columns },
         { "execute_auto_create_csv_from_schema", test_execute_auto_create_csv_from_schema },
         { "execute_type_validation_failure", test_execute_type_validation_failure },
         { "execute_select_projection", test_execute_select_projection },
+        { "execute_select_all_where_raw", test_execute_select_all_where_raw },
+        { "execute_select_projection_where_raw", test_execute_select_projection_where_raw },
+        { "execute_script_insert_then_select_where_sees_staged_row", test_execute_script_insert_then_select_where_sees_staged_row },
         { "execute_script_insert_then_select_sees_staged_row", test_execute_script_insert_then_select_sees_staged_row },
+        { "execute_select_projection_where_pretty_ascii", test_execute_select_projection_where_pretty_ascii },
         { "execute_select_all_pretty_ascii", test_execute_select_all_pretty_ascii },
+        { "execute_select_where_pretty_empty_result", test_execute_select_where_pretty_empty_result },
         { "execute_select_projection_pretty_ascii", test_execute_select_projection_pretty_ascii },
         { "execute_select_pretty_empty_result", test_execute_select_pretty_empty_result },
         { "execute_script_insert_then_select_pretty_ascii", test_execute_script_insert_then_select_pretty_ascii },
         { "execute_select_pretty_strings_render_human_values", test_execute_select_pretty_strings_render_human_values },
         { "execute_script_rollback_on_failure", test_execute_script_rollback_on_failure },
+        { "execute_select_where_requires_schema", test_execute_select_where_requires_schema },
+        { "execute_select_where_rejects_unknown_column", test_execute_select_where_rejects_unknown_column },
+        { "execute_select_where_rejects_type_mismatch", test_execute_select_where_rejects_type_mismatch },
+        { "execute_select_where_rejects_invalid_int_cell", test_execute_select_where_rejects_invalid_int_cell },
+        { "execute_script_rollback_on_where_failure", test_execute_script_rollback_on_where_failure },
         { "execute_select_all_rejects_invalid_row_shape", test_execute_select_all_rejects_invalid_row_shape },
         { "execute_output_failure_rolls_back_committed_data", test_execute_output_failure_rolls_back_committed_data },
         { "execute_pretty_output_failure_rolls_back_committed_data", test_execute_pretty_output_failure_rolls_back_committed_data },

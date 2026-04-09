@@ -27,6 +27,14 @@ typedef struct CsvRow {
     size_t count;
 } CsvRow;
 
+typedef struct SelectWhereFilter {
+    int enabled;
+    size_t column_index;
+    StorageColumnType column_type;
+    const char *column_name;
+    const SqlValue *value;
+} SelectWhereFilter;
+
 static void csv_row_init(CsvRow *row) {
     if (row != NULL) {
         memset(row, 0, sizeof(*row));
@@ -1170,6 +1178,118 @@ static int validate_row_shape(const CsvRow *row,
     return SQL_SUCCESS;
 }
 
+static int parse_signed_integer_text(const char *text, long long *out_value) {
+    char *endptr;
+    long long parsed;
+
+    if (text == NULL || out_value == NULL) {
+        return SQL_FAILURE;
+    }
+
+    errno = 0;
+    parsed = strtoll(text, &endptr, 10);
+    if (errno == ERANGE || endptr == text || *endptr != '\0') {
+        return SQL_FAILURE;
+    }
+
+    *out_value = parsed;
+    return SQL_SUCCESS;
+}
+
+static int prepare_where_filter(const TableSchema *schema,
+                                int has_schema,
+                                int has_where,
+                                const char *where_column,
+                                const SqlValue *where_value,
+                                SelectWhereFilter *out_filter,
+                                SqlError *err,
+                                const char *csv_path) {
+    int schema_index;
+    StorageColumnType column_type;
+
+    memset(out_filter, 0, sizeof(*out_filter));
+    if (!has_where) {
+        return SQL_SUCCESS;
+    }
+
+    if (!has_schema) {
+        sql_error_set(err, SQL_ERR_UNSUPPORTED, 0, "WHERE requires a schema file for '%s'", csv_path);
+        return SQL_FAILURE;
+    }
+
+    if (where_column == NULL || where_value == NULL) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "WHERE requires both a column and literal");
+        return SQL_FAILURE;
+    }
+
+    schema_index = find_schema_index(schema, where_column);
+    if (schema_index < 0) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Unknown WHERE column '%s' for '%s'", where_column, csv_path);
+        return SQL_FAILURE;
+    }
+
+    column_type = schema->columns[schema_index].type;
+    if (column_type == STORAGE_COL_INT && where_value->type != SQL_VALUE_INT) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "WHERE column '%s' in '%s' expects INT literal", where_column, csv_path);
+        return SQL_FAILURE;
+    }
+
+    if (column_type == STORAGE_COL_STRING && where_value->type != SQL_VALUE_STRING) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "WHERE column '%s' in '%s' expects STRING literal", where_column, csv_path);
+        return SQL_FAILURE;
+    }
+
+    out_filter->enabled = 1;
+    out_filter->column_index = (size_t) schema_index;
+    out_filter->column_type = column_type;
+    out_filter->column_name = where_column;
+    out_filter->value = where_value;
+    return SQL_SUCCESS;
+}
+
+static int row_matches_where(const CsvRow *row,
+                             const SelectWhereFilter *where_filter,
+                             int *out_matches,
+                             SqlError *err,
+                             const char *csv_path) {
+    const char *field;
+
+    if (out_matches == NULL) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "WHERE match output is required");
+        return SQL_FAILURE;
+    }
+
+    *out_matches = 1;
+    if (where_filter == NULL || !where_filter->enabled) {
+        return SQL_SUCCESS;
+    }
+
+    field = row->fields[where_filter->column_index];
+    if (where_filter->column_type == STORAGE_COL_STRING) {
+        *out_matches = (strcmp(field, where_filter->value->as.string_value) == 0);
+        return SQL_SUCCESS;
+    }
+
+    {
+        long long parsed_value;
+
+        if (parse_signed_integer_text(field, &parsed_value) != SQL_SUCCESS) {
+            sql_error_set(err,
+                          SQL_ERR_PARSE,
+                          0,
+                          "Column '%s' in '%s' contains invalid INT value '%s' for WHERE",
+                          where_filter->column_name,
+                          csv_path,
+                          field);
+            return SQL_FAILURE;
+        }
+
+        *out_matches = (parsed_value == where_filter->value->as.int_value);
+    }
+
+    return SQL_SUCCESS;
+}
+
 static int write_projection_row_csv(FILE *out,
                                     const TableSchema *schema,
                                     const CsvRow *row,
@@ -1385,6 +1505,7 @@ static int build_initial_widths(size_t **out_widths,
 
 static int measure_pretty_widths(FILE *file,
                                  const CsvRow *header_row,
+                                 const SelectWhereFilter *where_filter,
                                  const size_t *selected_indices,
                                  size_t selected_count,
                                  size_t *widths,
@@ -1395,6 +1516,7 @@ static int measure_pretty_widths(FILE *file,
         CsvRow row;
         int read_result;
         size_t i;
+        int matches_where;
 
         record = NULL;
         csv_row_init(&row);
@@ -1416,6 +1538,16 @@ static int measure_pretty_widths(FILE *file,
         if (validate_row_shape(&row, header_row, csv_path, err) != SQL_SUCCESS) {
             csv_row_free(&row);
             return SQL_FAILURE;
+        }
+
+        if (row_matches_where(&row, where_filter, &matches_where, err, csv_path) != SQL_SUCCESS) {
+            csv_row_free(&row);
+            return SQL_FAILURE;
+        }
+
+        if (!matches_where) {
+            csv_row_free(&row);
+            continue;
         }
 
         for (i = 0; i < selected_count; ++i) {
@@ -1589,6 +1721,7 @@ static int write_pretty_data_row(FILE *out,
 static int render_pretty_rows(FILE *file,
                               FILE *out,
                               const CsvRow *header_row,
+                              const SelectWhereFilter *where_filter,
                               const size_t *selected_indices,
                               const size_t *widths,
                               const unsigned char *align_right,
@@ -1599,6 +1732,7 @@ static int render_pretty_rows(FILE *file,
         char *record;
         CsvRow row;
         int read_result;
+        int matches_where;
 
         record = NULL;
         csv_row_init(&row);
@@ -1617,8 +1751,22 @@ static int render_pretty_rows(FILE *file,
         }
         free(record);
 
-        if (validate_row_shape(&row, header_row, csv_path, err) != SQL_SUCCESS ||
-            write_pretty_data_row(out, &row, selected_indices, widths, align_right, column_count, err, csv_path) != SQL_SUCCESS) {
+        if (validate_row_shape(&row, header_row, csv_path, err) != SQL_SUCCESS) {
+            csv_row_free(&row);
+            return SQL_FAILURE;
+        }
+
+        if (row_matches_where(&row, where_filter, &matches_where, err, csv_path) != SQL_SUCCESS) {
+            csv_row_free(&row);
+            return SQL_FAILURE;
+        }
+
+        if (!matches_where) {
+            csv_row_free(&row);
+            continue;
+        }
+
+        if (write_pretty_data_row(out, &row, selected_indices, widths, align_right, column_count, err, csv_path) != SQL_SUCCESS) {
             csv_row_free(&row);
             return SQL_FAILURE;
         }
@@ -1635,6 +1783,7 @@ static int write_pretty_table(FILE *file,
                               const CsvRow *header_row,
                               const TableSchema *schema,
                               int has_schema,
+                              const SelectWhereFilter *where_filter,
                               const size_t *selected_indices,
                               const char *const *display_headers,
                               size_t selected_count,
@@ -1656,6 +1805,7 @@ static int write_pretty_table(FILE *file,
 
     result = measure_pretty_widths(file,
                                    header_row,
+                                   where_filter,
                                    selected_indices,
                                    selected_count,
                                    widths,
@@ -1685,6 +1835,7 @@ static int write_pretty_table(FILE *file,
         result = render_pretty_rows(file,
                                     out,
                                     header_row,
+                                    where_filter,
                                     selected_indices,
                                     widths,
                                     align_right,
@@ -1898,6 +2049,9 @@ int storage_select_projection(const char *data_dir,
                               const char *const *column_names,
                               size_t column_count,
                               int select_all,
+                              int has_where,
+                              const char *where_column,
+                              const SqlValue *where_value,
                               FILE *out,
                               SqlError *err) {
     return storage_select_projection_mode(data_dir,
@@ -1906,6 +2060,9 @@ int storage_select_projection(const char *data_dir,
                                           column_names,
                                           column_count,
                                           select_all,
+                                          has_where,
+                                          where_column,
+                                          where_value,
                                           EXECUTE_OUTPUT_RAW,
                                           out,
                                           err);
@@ -1917,6 +2074,9 @@ int storage_select_projection_mode(const char *data_dir,
                                    const char *const *column_names,
                                    size_t column_count,
                                    int select_all,
+                                   int has_where,
+                                   const char *where_column,
+                                   const SqlValue *where_value,
                                    ExecuteOutputMode output_mode,
                                    FILE *out,
                                    SqlError *err) {
@@ -1930,6 +2090,7 @@ int storage_select_projection_mode(const char *data_dir,
     size_t *selected_indices;
     size_t selected_count;
     const char *const *display_headers;
+    SelectWhereFilter where_filter;
 
     if (err == NULL) {
         return SQL_FAILURE;
@@ -1953,6 +2114,7 @@ int storage_select_projection_mode(const char *data_dir,
     display_headers = NULL;
     has_schema = 0;
     data_start = 0L;
+    memset(&where_filter, 0, sizeof(where_filter));
     csv_row_init(&header_row);
     table_schema_init(&schema);
 
@@ -1979,7 +2141,22 @@ int storage_select_projection_mode(const char *data_dir,
         return SQL_FAILURE;
     }
 
-    if (output_mode == EXECUTE_OUTPUT_RAW && select_all) {
+    if (prepare_where_filter(&schema,
+                             has_schema,
+                             has_where,
+                             where_column,
+                             where_value,
+                             &where_filter,
+                             err,
+                             csv_path) != SQL_SUCCESS) {
+        csv_row_free(&header_row);
+        fclose(file);
+        table_schema_free(&schema);
+        free(csv_path);
+        return SQL_FAILURE;
+    }
+
+    if (output_mode == EXECUTE_OUTPUT_RAW && select_all && !where_filter.enabled) {
         if (fseek(file, 0L, SEEK_SET) != 0) {
             csv_row_free(&header_row);
             fclose(file);
@@ -2033,6 +2210,7 @@ int storage_select_projection_mode(const char *data_dir,
                                     &header_row,
                                     &schema,
                                     has_schema,
+                                    &where_filter,
                                     selected_indices,
                                     display_headers,
                                     selected_count,
@@ -2046,7 +2224,7 @@ int storage_select_projection_mode(const char *data_dir,
         return result;
     }
 
-    if (!select_all && write_projection_header_csv(out, column_names, column_count, err, csv_path) != SQL_SUCCESS) {
+    if (write_projection_header_csv(out, display_headers, selected_count, err, csv_path) != SQL_SUCCESS) {
         free(selected_indices);
         csv_row_free(&header_row);
         fclose(file);
@@ -2059,6 +2237,7 @@ int storage_select_projection_mode(const char *data_dir,
         char *record;
         CsvRow row;
         int read_result;
+        int matches_where;
 
         record = NULL;
         csv_row_init(&row);
@@ -2087,8 +2266,32 @@ int storage_select_projection_mode(const char *data_dir,
         }
         free(record);
 
-        if (validate_row_shape(&row, &header_row, csv_path, err) != SQL_SUCCESS ||
-            write_projection_row_csv(out, &schema, &row, selected_indices, selected_count, err, csv_path) != SQL_SUCCESS) {
+        if (validate_row_shape(&row, &header_row, csv_path, err) != SQL_SUCCESS) {
+            csv_row_free(&row);
+            free(selected_indices);
+            csv_row_free(&header_row);
+            fclose(file);
+            table_schema_free(&schema);
+            free(csv_path);
+            return SQL_FAILURE;
+        }
+
+        if (row_matches_where(&row, &where_filter, &matches_where, err, csv_path) != SQL_SUCCESS) {
+            csv_row_free(&row);
+            free(selected_indices);
+            csv_row_free(&header_row);
+            fclose(file);
+            table_schema_free(&schema);
+            free(csv_path);
+            return SQL_FAILURE;
+        }
+
+        if (!matches_where) {
+            csv_row_free(&row);
+            continue;
+        }
+
+        if (write_projection_row_csv(out, &schema, &row, selected_indices, selected_count, err, csv_path) != SQL_SUCCESS) {
             csv_row_free(&row);
             free(selected_indices);
             csv_row_free(&header_row);
@@ -2124,5 +2327,5 @@ int storage_select_all(const char *data_dir,
                        const char *table,
                        FILE *out,
                        SqlError *err) {
-    return storage_select_projection(data_dir, schema_name, table, NULL, 0, 1, out, err);
+    return storage_select_projection(data_dir, schema_name, table, NULL, 0, 1, 0, NULL, NULL, out, err);
 }
