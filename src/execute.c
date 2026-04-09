@@ -456,7 +456,11 @@ static int flush_and_copy_output(FILE *buffer, FILE *out, SqlError *err) {
     return SQL_SUCCESS;
 }
 
-static int execute_statement_unstaged(const Statement *stmt, const char *data_dir, FILE *out, SqlError *err) {
+static int execute_statement_unstaged(const Statement *stmt,
+                                      const char *data_dir,
+                                      ExecuteOutputMode output_mode,
+                                      FILE *out,
+                                      SqlError *err) {
     if (err == NULL) {
         return SQL_FAILURE;
     }
@@ -497,14 +501,18 @@ static int execute_statement_unstaged(const Statement *stmt, const char *data_di
     }
 
     if (stmt->type == STMT_SELECT) {
-        return storage_select_projection(data_dir,
-                                         stmt->schema,
-                                         stmt->table,
-                                         (const char *const *) stmt->columns,
-                                         stmt->column_count,
-                                         stmt->select_all,
-                                         out,
-                                         err);
+        return storage_select_projection_mode(data_dir,
+                                              stmt->schema,
+                                              stmt->table,
+                                              (const char *const *) stmt->columns,
+                                              stmt->column_count,
+                                              stmt->select_all,
+                                              stmt->has_where,
+                                              stmt->where_column,
+                                              &stmt->where_value,
+                                              output_mode,
+                                              out,
+                                              err);
     }
 
     sql_error_set(err, SQL_ERR_UNSUPPORTED, 0, "Unsupported statement type for execution");
@@ -512,6 +520,14 @@ static int execute_statement_unstaged(const Statement *stmt, const char *data_di
 }
 
 int execute_statement(const Statement *stmt, const char *data_dir, FILE *out, SqlError *err) {
+    return execute_statement_formatted(stmt, data_dir, EXECUTE_OUTPUT_RAW, out, err);
+}
+
+int execute_statement_formatted(const Statement *stmt,
+                                const char *data_dir,
+                                ExecuteOutputMode output_mode,
+                                FILE *out,
+                                SqlError *err) {
     SqlScript script;
 
     if (err == NULL) {
@@ -524,9 +540,14 @@ int execute_statement(const Statement *stmt, const char *data_dir, FILE *out, Sq
         return SQL_FAILURE;
     }
 
+    if (output_mode != EXECUTE_OUTPUT_RAW && output_mode != EXECUTE_OUTPUT_PRETTY_ASCII) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Unsupported execute output mode");
+        return SQL_FAILURE;
+    }
+
     script.statements = (Statement *) stmt;
     script.statement_count = 1;
-    return execute_script(&script, data_dir, out, err);
+    return execute_script_formatted(&script, data_dir, output_mode, out, err);
 }
 
 static int rollback_committed_csvs(const char *data_dir,
@@ -719,6 +740,14 @@ static int commit_staged_csvs(const char *stage_dir,
 }
 
 int execute_script(const SqlScript *script, const char *data_dir, FILE *out, SqlError *err) {
+    return execute_script_formatted(script, data_dir, EXECUTE_OUTPUT_RAW, out, err);
+}
+
+int execute_script_formatted(const SqlScript *script,
+                             const char *data_dir,
+                             ExecuteOutputMode output_mode,
+                             FILE *out,
+                             SqlError *err) {
     StringList touched_csvs;
     StringList managed_files;
     StringList commit_backup_names;
@@ -737,6 +766,11 @@ int execute_script(const SqlScript *script, const char *data_dir, FILE *out, Sql
     sql_error_clear(err);
     if (script == NULL || data_dir == NULL || out == NULL) {
         sql_error_set(err, SQL_ERR_ARGUMENT, 0, "script, data_dir, and out are required");
+        return SQL_FAILURE;
+    }
+
+    if (output_mode != EXECUTE_OUTPUT_RAW && output_mode != EXECUTE_OUTPUT_PRETTY_ASCII) {
+        sql_error_set(err, SQL_ERR_ARGUMENT, 0, "Unsupported execute output mode");
         return SQL_FAILURE;
     }
 
@@ -796,7 +830,7 @@ int execute_script(const SqlScript *script, const char *data_dir, FILE *out, Sql
             return SQL_FAILURE;
         }
 
-        if (execute_statement_unstaged(stmt, exec_dir, buffer, err) != SQL_SUCCESS) {
+        if (execute_statement_unstaged(stmt, exec_dir, output_mode, buffer, err) != SQL_SUCCESS) {
             fclose(buffer);
             remove(buffer_path);
             free(buffer_path);
