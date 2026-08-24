@@ -1,8 +1,8 @@
-# MiniDBMSPhase1
+# CSVQueryEngine
 
 SQL 파일을 읽어 CSV table을 조회하고 수정하는 C 기반 mini SQL processor입니다. 수동 parser, schema 검증, 여러 문장을 한 번에 처리하는 rollback 흐름까지 구현했습니다.
 
-이 저장소는 MiniDBMS 시리즈의 첫 단계입니다. 다음 단계에서는 B+Tree index와 binary storage를 추가하고, 마지막 단계에서는 concurrent API server로 확장합니다.
+세 프로젝트로 이어지는 SQL 엔진 구현의 첫 단계입니다. 다음 단계에서는 B+Tree index와 binary storage를 추가하고, 마지막 단계에서는 concurrent API server로 확장합니다.
 
 ## 시작한 이유
 
@@ -103,5 +103,5 @@ make test
 
 ## 관련 프로젝트
 
-- [MiniDBMSPhase2](https://github.com/NearthYou/MiniDBMSPhase2): B+Tree index와 binary storage를 추가한 다음 단계
-- [MiniDBMS](https://github.com/NearthYou/MiniDBMS): transaction과 thread pool을 갖춘 최종 단계
+- [BPlusTreeQueryEngine](https://github.com/NearthYou/BPlusTreeQueryEngine): B+Tree index와 binary storage를 추가한 다음 단계
+- [ConcurrentSQLServer](https://github.com/NearthYou/ConcurrentSQLServer): transaction과 thread pool을 갖춘 최종 단계
