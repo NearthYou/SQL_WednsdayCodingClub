@@ -1,100 +1,107 @@
-<div align="center">
-<img width="356" height="354" alt="image" src="https://github.com/user-attachments/assets/9662a483-849c-4ff2-9bfa-8ee0feaf7d9c" />
+# MiniDBMSPhase1
 
-# SQL_WednsdayCodingClub
+SQL 파일을 읽어 CSV table을 조회하고 수정하는 C 기반 mini SQL processor입니다. 수동 parser, schema 검증, 여러 문장을 한 번에 처리하는 rollback 흐름까지 구현했습니다.
 
-### CSV 기반 Mini SQL Processor
+이 저장소는 MiniDBMS 시리즈의 첫 단계입니다. 다음 단계에서는 B+Tree index와 binary storage를 추가하고, 마지막 단계에서는 concurrent API server로 확장합니다.
 
-</div>
+## 시작한 이유
 
----
+SQL 문장이 parser, executor, storage를 거쳐 실제 데이터 변경으로 이어지는 과정을 직접 구현하며 DBMS의 기본 경계를 공부하려고 시작했습니다. 크래프톤 정글 수요코딩회에서 제한된 문법부터 안전하게 실행하는 데 집중했습니다.
 
-## 프로젝트 소개
+## 핵심 기능
 
-우리 프로젝트는 SQL 파일을 읽어 CSV 데이터를 조회하고 반영하는 미니 SQL 처리기입니다.  
-SQL 파일 안의 `INSERT`와 `SELECT` 문장을 파싱하고, schema 규칙에 맞게 CSV 데이터를 안전하게 조회하거나 반영하도록 구현했습니다.
+| 영역 | 구현 |
+| --- | --- |
+| Parser | INSERT, SELECT, 여러 문장, quoted string |
+| AST | Statement와 SqlScript, 명시적인 memory ownership |
+| Schema | column 이름과 int, string type 검증 |
+| Storage | CSV 조회, 추가, projection, 자동 생성 |
+| Batch | stage directory에서 전체 문장 실행 |
+| Rollback | 문장이나 output 실패 시 원본 CSV 복구 |
 
-현재 프로젝트는 실제 DB 엔진 전체를 구현하는 것이 아니라, 제한된 SQL 문법이 어떤 흐름으로 읽히고 실행되는지를 직접 확인할 수 있도록 만드는 데에 초점을 두었습니다.
-
----
-
-## 구조도
+## 아키텍처와 코드 구조
 
 ```mermaid
 flowchart LR
-    A[SQL File] --> B[Manual Parser]
-    B --> C[AST<br/>Statement / SqlScript]
-    C --> D[Executor]
-    D --> E[Storage]
-    E --> F[CSV]
-    E --> G[schema.csv]
+    FILE[SQL file] --> PARSER[manual parser]
+    PARSER --> AST[Statement와 SqlScript]
+    AST --> EXEC[executor]
+    EXEC --> STAGE[stage directory]
+    STAGE --> STORE[CSV storage]
+    STORE --> SCHEMA[schema CSV]
+    STAGE -->|전체 성공| COMMIT[rename으로 반영]
+    STAGE -->|실패| ROLLBACK[원본 복구]
 ```
 
----
+| 경로 | 역할 |
+| --- | --- |
+| `src/parser.c` | token과 문장 경계를 읽어 AST 생성 |
+| `src/statement.c` | AST 초기화와 memory 해제 |
+| `src/execute.c` | 문장 실행, staging, commit과 rollback |
+| `src/storage.c` | CSV와 schema 읽기, 검증, 직렬화 |
+| `tests/test_parser.c` | parser와 실행 경계 회귀 검사 |
 
+## 문제 해결 과정
 
-## 핵심 설계
+### 문자열과 구두점을 보존하는 수동 scanner
 
-| 설계 포인트 | 선택한 방식 | 이유 |
-|---|---|---|
-| SQL 파싱 | **수동 스캐너 직접 구현** | 괄호, 쉼표, 여러 문장 경계를 현재 지원 문법 안에서 일관되게 처리함 |
-| 스키마 관리 | **테이블 CSV와 schema CSV 분리** | 스키마 정보는 CSV 파일 하나만으로 관리하기 힘듦  |
-| 다중 문장 실행 | **Rollback 기능** | 복사본에서 끝까지 실행한 뒤 전부 성공했을 때만 실제 데이터에 반영됨 |
+`strtok`는 입력을 바꾸고 현재 위치를 잃기 때문에 quoted string, 괄호, 쉼표, semicolon의 오류 위치를 정확히 표시하기 어려웠습니다. 입력과 현재 index를 가진 parser를 만들고 필요한 문자만 소비하도록 구성했습니다.
 
----
+쉼표 뒤에 값 없이 괄호가 닫히는 경우와 중복 column 이름을 즉시 거부했습니다. Windows에서 만든 SQL 파일의 UTF-8 BOM은 첫 token을 읽기 전에 건너뛰어 같은 query가 운영체제에 따라 실패하지 않게 했습니다.
 
-## 지원 기능
+### column 순서와 schema 순서 맞추기
 
-| 구분 | 내용 |
-|---|---|
-| `INSERT` | `INSERT INTO table VALUES (...);` |
-| `INSERT` | `INSERT INTO table (col1, col2, ...) VALUES (...);` |
-| `SELECT` | `SELECT * FROM table;` |
-| `SELECT` | `SELECT col1, col2 FROM table;` |
-| Multi-statement | SQL 파일 하나에 여러 문장 실행 가능 |
-| Schema validation | 타입 검증, 컬럼 순서 재정렬, projection 검증 지원 |
+`INSERT INTO users (name, id, age)`처럼 입력 순서가 schema와 다르면 값을 그대로 저장할 수 없습니다. column 이름을 schema index에 대응시킨 뒤 값을 table 순서로 재배열하고, 빠진 column과 type을 함께 검사했습니다.
 
----
+projection SELECT도 요청 column의 index를 먼저 찾고 각 row에서 같은 위치만 출력했습니다. `SELECT *`도 raw copy 대신 row를 다시 읽어 header와 field 수가 다른 CSV를 거부했습니다.
 
-## 플로우차트
+### 여러 문장을 원본과 분리해 실행
 
-```mermaid
-flowchart TD
-    A[SQL Input] --> B{INSERT exists?}
-    B -- No --> C[SELECT]
-    B -- Yes --> D[Stage Dir]
-    D --> E[Copy CSV / schema]
-    E --> F[Column Mapping]
-    F --> G[Type Validation]
-    G --> H{All Success?}
-    H -- Yes --> I[Commit]
-    H -- No --> J[Rollback]
-    C --> K[Output]
-    I --> K
-    J --> L[Error]
+첫 번째 INSERT가 성공한 뒤 두 번째 문장이 실패하면 앞선 변경만 남을 수 있습니다. 원본 CSV를 stage directory로 복사해 모든 문장을 그 안에서 실행하고, 끝까지 성공한 경우에만 임시 파일을 rename해 반영했습니다.
+
+commit 도중 또는 결과 출력에서 오류가 나면 backup을 이용해 이미 반영한 table도 되돌립니다. 실행 결과 역시 buffer에 모아 batch가 성공한 뒤 출력합니다.
+
+### 동적 목록 확장 시 overflow 확인
+
+Statement와 column 목록을 `realloc`으로 늘릴 때 count 곱셈이 overflow되면 필요한 크기보다 작은 buffer가 생길 수 있습니다. 새 크기를 계산하기 전에 `SIZE_MAX` 경계를 확인하고, 실패하면 부분 AST를 정리하도록 했습니다.
+
+## 기여
+
+팀 프로젝트에서 저는 SQL 처리 흐름의 초기 구현과 확장을 맡았습니다.
+
+- 수동 parser와 AST ownership 규칙
+- CSV executor와 storage 계층 분리
+- schema 기반 column mapping과 type validation
+- 여러 문장 처리와 staging rollback 기반 구성
+- BOM, trailing comma, 동적 배열 overflow 경계 처리
+
+최종 commit과 rollback의 I/O edge case는 팀원이 함께 보강했습니다.
+
+## 실행 방법
+
+GCC와 Make가 있는 Linux 환경에서 실행합니다.
+
+```bash
+make
+./sql_processor queries/script_users_roundtrip.sql data
 ```
 
----
+## 테스트
 
-## 시연 포인트
+```bash
+make clean
+make test
+```
 
-| 시연 내용 | 확인할 수 있는 점 |
-|---|---|
-| `INSERT INTO users (name, id, age) ...` | 입력 컬럼 순서가 달라도 schema 순서에 맞게 재정렬되어 저장됩니다. |
-| `SELECT name, age FROM users;` | 필요한 컬럼만 projection 형태로 조회할 수 있습니다. |
-| `INSERT ...; INSERT bad ...;` | 여러 문장 중 하나가 실패하면 전체 작업이 rollback되어 원본 데이터가 그대로 유지됩니다. |
+현재 17개 회귀 시나리오가 parser, schema mapping, projection, batch rollback, malformed CSV와 output 실패를 검사합니다.
 
----
+## 남은 과제
 
-## 협업 방식
+- WHERE 조건과 UPDATE, DELETE 문법 추가
+- 여러 process가 같은 CSV를 수정할 때의 lock 설계
+- B+Tree index를 이용한 조회 경로 추가
 
-**코드 리뷰를 활용한 협업**
-1. 명세서를 작성해 구현 범위와 동작 정리
-2. Codex를 활용한 구현
-3. 팀원 모두 같은 화면을 보며 코드 분석
+## 관련 프로젝트
 
----
-
-## 한계
-
-이 프로젝트는 학습 목적의 미니 SQL 처리기이므로 `WHERE`, `JOIN`, `UPDATE`, `DELETE`, 정렬, 집계 같은 고급 기능은 아직 지원하지 않습니다. 대신 현재 범위 안에서 파싱, schema 검증, 다중 문장 처리, rollback 흐름이 명확하게 드러나도록 구현했습니다.
+- [MiniDBMSPhase2](https://github.com/NearthYou/MiniDBMSPhase2): B+Tree index와 binary storage를 추가한 다음 단계
+- [MiniDBMS](https://github.com/NearthYou/MiniDBMS): transaction과 thread pool을 갖춘 최종 단계
