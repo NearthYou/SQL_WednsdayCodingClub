@@ -3,6 +3,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void free_sql_value(SqlValue *value) {
+    if (value == NULL) {
+        return;
+    }
+
+    if (value->type == SQL_VALUE_STRING) {
+        free(value->as.string_value);
+        value->as.string_value = NULL;
+    }
+}
+
 /* NULL 안전하게 0으로 초기화해 호출자가 언제든 free 경로를 재사용할 수 있게 한다. */
 void statement_init(Statement *stmt) {
     if (stmt == NULL) {
@@ -31,6 +42,7 @@ void statement_free(Statement *stmt) {
 
     free(stmt->schema);
     free(stmt->table);
+    free(stmt->where_column);
 
     for (i = 0; i < column_count; ++i) {
         free(columns[i]);
@@ -38,11 +50,10 @@ void statement_free(Statement *stmt) {
     free(columns);
 
     for (i = 0; i < value_count; ++i) {
-        if (values[i].type == SQL_VALUE_STRING) {
-            free(values[i].as.string_value);
-        }
+        free_sql_value(&values[i]);
     }
 
+    free_sql_value(&stmt->where_value);
     free(values);
     statement_init(stmt);
 }

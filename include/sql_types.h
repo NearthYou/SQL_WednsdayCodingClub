@@ -33,6 +33,10 @@ typedef struct Statement {
     size_t column_count;
     /* SELECT * 인지, 아니면 columns projection 인지 구분한다. */
     int select_all;
+    /* SELECT WHERE column = literal 형태의 단일 조건이다. */
+    int has_where;
+    char *where_column;
+    SqlValue where_value;
     SqlValue *values;
     size_t value_count;
 } Statement;
